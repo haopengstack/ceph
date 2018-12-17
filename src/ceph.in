@@ -169,7 +169,7 @@ else:
 
 def raw_write(buf):
     sys.stdout.flush()
-    raw_stdout.write(buf)
+    raw_stdout.write(rados.cstr(buf, ''))
 
 
 def osdids():
@@ -462,8 +462,6 @@ def wrap(s, width, indent):
             s = s[splitpos:]
 
             yield result
-
-    raise StopIteration
 
 
 def format_help(cmddict, partial=None):

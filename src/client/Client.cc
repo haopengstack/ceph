@@ -887,6 +887,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
       ldout(cct, 20) << " dir hash is " << (int)in->dir_layout.dl_dir_hash << dendl;
       in->rstat = st->rstat;
       in->quota = st->quota;
+      in->dir_pin = st->dir_pin;
     }
     // move me if/when version reflects fragtree changes.
     if (in->dirfragtree != st->dirfragtree) {
@@ -4898,7 +4899,6 @@ void Client::handle_cap_export(MetaSession *session, Inode *in, MClientCaps *m)
 	    tcap.cap_id = m->peer.cap_id;
 	    tcap.seq = m->peer.seq - 1;
 	    tcap.issue_seq = tcap.seq;
-	    tcap.mseq = m->peer.mseq;
 	    tcap.issued |= cap.issued;
 	    tcap.implemented |= cap.issued;
 	    if (&cap == in->auth_cap)
@@ -9255,9 +9255,9 @@ int Client::_read_sync(Fh *f, uint64_t off, uint64_t len, bufferlist *bl,
 	int64_t some = in->size - pos;
 	if (some > left)
 	  some = left;
-	bufferptr z(some);
-	z.zero();
-	bl->push_back(z);
+	auto z = buffer::ptr_node::create(some);
+	z->zero();
+	bl->push_back(std::move(z));
 	read += some;
 	pos += some;
 	left -= some;
@@ -9392,6 +9392,8 @@ int Client::_preadv_pwritev(int fd, const struct iovec *iov, unsigned iovcnt, in
 int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
 	                const struct iovec *iov, int iovcnt)
 {
+  uint64_t fpos = 0;
+
   if ((uint64_t)(offset+size) > mdsmap->get_max_filesize()) //too large!
     return -EFBIG;
 
@@ -9430,7 +9432,7 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
       }
     }
     offset = f->pos;
-    f->pos = offset+size;
+    fpos = offset+size;
     unlock_fh_pos(f);
   }
 
@@ -9569,6 +9571,11 @@ success:
   lat -= start;
   logger->tinc(l_c_wrlat, lat);
 
+  if (fpos) {
+    lock_fh_pos(f);
+    f->pos = fpos;
+    unlock_fh_pos(f);
+  }
   totalwritten = size;
   r = (int64_t)totalwritten;
 
@@ -10334,19 +10341,12 @@ int Client::test_dentry_handling(bool can_invalidate)
     ceph_assert(dentry_invalidate_cb);
     ldout(cct, 1) << "using dentry_invalidate_cb" << dendl;
     r = 0;
-  } else if (remount_cb) {
+  } else {
+    ceph_assert(remount_cb);
     ldout(cct, 1) << "using remount_cb" << dendl;
     r = _do_remount(false);
   }
-  if (r) {
-    bool should_abort = cct->_conf.get_val<bool>("client_die_on_failed_dentry_invalidate");
-    if (should_abort) {
-      lderr(cct) << "no method to invalidate kernel dentry cache; quitting!" << dendl;
-      ceph_abort();
-    } else {
-      lderr(cct) << "no method to invalidate kernel dentry cache; expect issues!" << dendl;
-    }
-  }
+
   return r;
 }
 
@@ -11742,6 +11742,14 @@ size_t Client::_vxattrcb_dir_rctime(Inode *in, char *val, size_t size)
   return snprintf(val, size, "%ld.09%ld", (long)in->rstat.rctime.sec(),
       (long)in->rstat.rctime.nsec());
 }
+bool Client::_vxattrcb_dir_pin_exists(Inode *in)
+{
+  return in->dir_pin != -ENODATA;
+}
+size_t Client::_vxattrcb_dir_pin(Inode *in, char *val, size_t size)
+{
+  return snprintf(val, size, "%ld", (long)in->dir_pin);
+}
 
 #define CEPH_XATTR_NAME(_type, _name) "ceph." #_type "." #_name
 #define CEPH_XATTR_NAME2(_type, _name, _name2) "ceph." #_type "." #_name "." #_name2
@@ -11815,6 +11823,14 @@ const Client::VXattr Client::_dir_vxattrs[] = {
   },
   XATTR_QUOTA_FIELD(quota, max_bytes),
   XATTR_QUOTA_FIELD(quota, max_files),
+  {
+    name: "ceph.dir.pin",
+    getxattr_cb: &Client::_vxattrcb_dir_pin,
+    readonly: false,
+    hidden: true,
+    exists_cb: &Client::_vxattrcb_dir_pin_exists,
+    flags: 0,
+  },
   { name: "" }     /* Required table terminator */
 };
 
@@ -13181,10 +13197,10 @@ int Client::ll_write_block(Inode *in, uint64_t blockid,
   }
   object_t oid = file_object_t(vino.ino, blockid);
   SnapContext fakesnap;
-  bufferptr bp;
-  if (length > 0) bp = buffer::copy(buf, length);
-  bufferlist bl;
-  bl.push_back(bp);
+  ceph::bufferlist bl;
+  if (length > 0) {
+    bl.push_back(buffer::copy(buf, length));
+  }
 
   ldout(cct, 1) << "ll_block_write for " << vino.ino << "." << blockid
 		<< dendl;

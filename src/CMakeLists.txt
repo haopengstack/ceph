@@ -364,6 +364,7 @@ set(ceph_common_deps
   ${Backtrace_LIBRARIES}
   ${BLKIN_LIBRARIES}
   ${CRYPTO_LIBS}
+  ${GSSAPI_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
   ${CMAKE_DL_LIBS})
 if(HAVE_UDEV)
@@ -455,7 +456,7 @@ endif()
 set(librados_config_srcs
   librados-config.cc)
 add_executable(librados-config ${librados_config_srcs})
-target_link_libraries(librados-config librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
+target_link_libraries(librados-config librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${GSSAPI_LIBRARIES})
 
 install(TARGETS librados-config DESTINATION bin)
 
@@ -477,7 +478,7 @@ add_executable(ceph-mon ${ceph_mon_srcs}
 add_dependencies(ceph-mon erasure_code_plugins)
 target_link_libraries(ceph-mon mon os global-static ceph-common
   ${EXTRALIBS}
-  ${CMAKE_DL_LIBS})
+  ${CMAKE_DL_LIBS} ${GSSAPI_LIBRARIES})
 install(TARGETS ceph-mon DESTINATION bin)
 
 # OSD/ObjectStore
@@ -512,13 +513,15 @@ set_target_properties(ceph-osd PROPERTIES
   POSITION_INDEPENDENT_CODE ${EXE_LINKER_USE_PIE})
 install(TARGETS ceph-osd DESTINATION bin)
 
-add_subdirectory(mds)
-set(ceph_mds_srcs
-  ceph_mds.cc)
-add_executable(ceph-mds ${ceph_mds_srcs})
-target_link_libraries(ceph-mds mds ${CMAKE_DL_LIBS} global-static ceph-common
-  Boost::thread)
-install(TARGETS ceph-mds DESTINATION bin)
+if (WITH_CEPHFS)
+  add_subdirectory(mds)
+  set(ceph_mds_srcs
+    ceph_mds.cc)
+  add_executable(ceph-mds ${ceph_mds_srcs})
+  target_link_libraries(ceph-mds mds ${CMAKE_DL_LIBS} global-static ceph-common
+    Boost::thread)
+  install(TARGETS ceph-mds DESTINATION bin)
+endif()
 
 add_subdirectory(erasure-code)
 
@@ -654,7 +657,7 @@ if(WITH_FUSE)
     client/fuse_ll.cc)
   add_executable(ceph-fuse ${ceph_fuse_srcs})
   target_link_libraries(ceph-fuse ${FUSE_LIBRARIES}
-    client ceph-common global-static)
+    ${GSSAPI_LIBRARIES} client ceph-common global-static)
   set_target_properties(ceph-fuse PROPERTIES
     COMPILE_FLAGS "-I${FUSE_INCLUDE_DIRS}"
     POSITION_INDEPENDENT_CODE ${EXE_LINKER_USE_PIE})
@@ -729,18 +732,23 @@ configure_file(
 add_custom_target(vstart-base DEPENDS
     ceph-osd
     ceph-mon
-    ceph-mgr
     ceph-authtool
     ceph-conf
     monmaptool
     crushtool
     rados
     cython${PY_BINDING_INFIX}_rados)
+if (WITH_MGR)
+  add_dependencies(vstart-base ceph-mgr)
+endif()
 
-add_custom_target(vstart DEPENDS
-    vstart-base
-    ceph-mds
-    cython${PY_BINDING_INFIX}_rbd)
+add_custom_target(vstart DEPENDS vstart-base)
+if (WITH_RBD)
+  add_dependencies(vstart cython${PY_BINDING_INFIX}_rbd)
+endif()
+if (WITH_CEPHFS)
+  add_dependencies(vstart ceph-mds)
+endif()
 if(WITH_RADOSGW)
   add_dependencies(vstart radosgw radosgw-admin)
 endif(WITH_RADOSGW)

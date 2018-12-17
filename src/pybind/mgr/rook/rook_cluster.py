@@ -19,7 +19,7 @@ except ImportError:
     ApiException = None
 
 ROOK_SYSTEM_NS = "rook-ceph-system"
-ROOK_API_VERSION = "v1beta1"
+ROOK_API_VERSION = "v1"
 ROOK_API_NAME = "ceph.rook.io/%s" % ROOK_API_VERSION
 
 log = logging.getLogger('rook')
@@ -58,7 +58,7 @@ class RookCluster(object):
 
         cluster_crd = {
             "apiVersion": ROOK_API_NAME,
-            "kind": "Cluster",
+            "kind": "CephCluster",
             "metadata": {
                 "name": self.cluster_name,
                 "namespace": self.cluster_name
@@ -69,7 +69,7 @@ class RookCluster(object):
             }
         }
 
-        self.rook_api_post("clusters", body=cluster_crd)
+        self.rook_api_post("cephclusters", body=cluster_crd)
 
     def rook_url(self, path):
         prefix = "/apis/ceph.rook.io/%s/namespaces/%s/" % (
@@ -91,6 +91,9 @@ class RookCluster(object):
 
     def rook_api_get(self, path, **kwargs):
         return self.rook_api_call("GET", path, **kwargs)
+
+    def rook_api_delete(self, path):
+        return self.rook_api_call("DELETE", path)
 
     def rook_api_patch(self, path, **kwargs):
         return self.rook_api_call("PATCH", path,
@@ -196,7 +199,7 @@ class RookCluster(object):
 
         rook_fs = {
             "apiVersion": ROOK_API_NAME,
-            "kind": "Filesystem",
+            "kind": "CephFilesystem",
             "metadata": {
                 "name": spec.name,
                 "namespace": self.rook_namespace
@@ -213,12 +216,12 @@ class RookCluster(object):
 
         try:
             self.rook_api_post(
-                "filesystems/",
+                "cephfilesystems/",
                 body=rook_fs
             )
         except ApiException as e:
             if e.status == 409:
-                log.info("Filesystem '{0}' already exists".format(spec.name))
+                log.info("CephFilesystem '{0}' already exists".format(spec.name))
                 # Idempotent, succeed.
             else:
                 raise
@@ -227,7 +230,7 @@ class RookCluster(object):
   
         rook_os = {
             "apiVersion": ROOK_API_NAME,
-            "kind": "ObjectStore",
+            "kind": "CephObjectStore",
             "metadata": {
                 "name": spec.name,
                 "namespace": self.rook_namespace
@@ -256,19 +259,38 @@ class RookCluster(object):
         
         try:
             self.rook_api_post(
-                "objectstores/",
+                "cephobjectstores/",
                 body=rook_os
             )
         except ApiException as e:
             if e.status == 409:
-                log.info("ObjectStore '{0}' already exists".format(spec.name))
+                log.info("CephObjectStore '{0}' already exists".format(spec.name))
                 # Idempotent, succeed.                                                                                                                                                                     
+            else:
+                raise
+
+    def rm_service(self, service_type, service_id):
+        assert service_type in ("mds", "rgw")
+
+        if service_type == "mds":
+            rooktype = "cephfilesystems"
+        elif service_type == "rgw":
+            rooktype = "cephobjectstores"
+
+        objpath = "{0}/{1}".format(rooktype, service_id)
+
+        try:
+            self.rook_api_delete(objpath)
+        except ApiException as e:
+            if e.status == 404:
+                log.info("{0} service '{1}' does not exist".format(service_type, service_id))
+                # Idempotent, succeed.
             else:
                 raise
 
     def can_create_osd(self):
         current_cluster = self.rook_api_get(
-            "clusters/{0}".format(self.cluster_name))
+            "cephclusters/{0}".format(self.cluster_name))
         use_all_nodes = current_cluster['spec'].get('useAllNodes', False)
 
         # If useAllNodes is set, then Rook will not be paying attention
@@ -306,7 +328,7 @@ class RookCluster(object):
         #           storeType: bluestore
 
         current_cluster = self.rook_api_get(
-            "clusters/{0}".format(self.cluster_name))
+            "cephclusters/{0}".format(self.cluster_name))
 
         patch = []
 
@@ -359,7 +381,7 @@ class RookCluster(object):
 
         try:
             self.rook_api_patch(
-                "clusters/{0}".format(self.cluster_name),
+                "cephclusters/{0}".format(self.cluster_name),
                 body=patch)
         except ApiException as e:
             log.exception("API exception: {0}".format(e))

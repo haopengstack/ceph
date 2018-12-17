@@ -1044,6 +1044,7 @@ OPTION(bluestore_fsck_on_umount, OPT_BOOL)
 OPTION(bluestore_fsck_on_umount_deep, OPT_BOOL)
 OPTION(bluestore_fsck_on_mkfs, OPT_BOOL)
 OPTION(bluestore_fsck_on_mkfs_deep, OPT_BOOL)
+OPTION(bluestore_fsck_error_on_legacy_stats, OPT_BOOL)
 OPTION(bluestore_sync_submit_transaction, OPT_BOOL) // submit kv txn in queueing thread (not kv_sync_thread)
 OPTION(bluestore_throttle_bytes, OPT_U64)
 OPTION(bluestore_throttle_deferred_bytes, OPT_U64)
@@ -1073,6 +1074,7 @@ OPTION(bluestore_debug_permit_any_bdev_label, OPT_BOOL)
 OPTION(bluestore_debug_random_read_err, OPT_DOUBLE)
 OPTION(bluestore_debug_inject_bug21040, OPT_BOOL)
 OPTION(bluestore_debug_inject_csum_err_probability, OPT_FLOAT)
+OPTION(bluestore_debug_no_per_pool_stats, OPT_BOOL)
 
 OPTION(kstore_max_ops, OPT_U64)
 OPTION(kstore_max_bytes, OPT_U64)
@@ -1536,13 +1538,6 @@ OPTION(debug_asok_assert_abort, OPT_BOOL)
 OPTION(rgw_swift_custom_header, OPT_STR) // option to enable swift custom headers
 
 OPTION(rgw_swift_need_stats, OPT_BOOL) // option to enable stats on bucket listing for swift
-
-/* resharding tunables */
-OPTION(rgw_reshard_num_logs, OPT_INT)
-OPTION(rgw_reshard_bucket_lock_duration, OPT_INT) // duration of lock on bucket obj during resharding
-OPTION(rgw_dynamic_resharding, OPT_BOOL)
-OPTION(rgw_max_objs_per_shard, OPT_INT)
-OPTION(rgw_reshard_thread_interval, OPT_U32) // maximum time between rounds of reshard thread processing
 
 OPTION(rgw_acl_grants_max_num, OPT_INT) // According to AWS S3(http://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html), An ACL can have up to 100 grants.
 OPTION(rgw_cors_rules_max_num, OPT_INT) // According to AWS S3(http://docs.aws.amazon.com/AmazonS3/latest/dev/cors.html), An cors can have up to 100 rules.

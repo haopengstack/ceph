@@ -45,47 +45,12 @@ using namespace ceph;
 #define CEPH_BUFFER_APPEND_SIZE (CEPH_BUFFER_ALLOC_UNIT - sizeof(raw_combined))
 
 #ifdef BUFFER_DEBUG
-# define bdout { std::lock_guard<ceph::spinlock> lg(ceph::spinlock()); std::cout
+# define bdout { std::lock_guard lg(ceph::spinlock()); std::cout
 # define bendl std::endl; }
 #else
 # define bdout if (0) { std::cout
 # define bendl std::endl; }
 #endif
-
-  static std::atomic<uint64_t> buffer_total_alloc { 0 };
-  static std::atomic<uint64_t> buffer_history_alloc_bytes { 0 };
-  static std::atomic<uint64_t> buffer_history_alloc_num { 0 };
-
-  const bool buffer_track_alloc = get_env_bool("CEPH_BUFFER_TRACK");
-
-  namespace {
-  void inc_total_alloc(unsigned len) {
-    if (buffer_track_alloc)
-      buffer_total_alloc += len;
-  }
-
-  void dec_total_alloc(unsigned len) {
-    if (buffer_track_alloc)
-      buffer_total_alloc -= len;
-  }
-
-  void inc_history_alloc(uint64_t len) {
-    if (buffer_track_alloc) {
-      buffer_history_alloc_bytes += len;
-      buffer_history_alloc_num++;
-    }
-  }
-  } // namespace
-
-  int buffer::get_total_alloc() {
-    return buffer_total_alloc;
-  }
-  uint64_t buffer::get_history_alloc_bytes() {
-    return buffer_history_alloc_bytes;
-  }
-  uint64_t buffer::get_history_alloc_num() {
-    return buffer_history_alloc_num;
-  }
 
   static std::atomic<unsigned> buffer_cached_crc { 0 };
   static std::atomic<unsigned> buffer_cached_crc_adjusted { 0 };
@@ -106,52 +71,6 @@ using namespace ceph;
   int buffer::get_missed_crc() {
     return buffer_missed_crc;
   }
-
-  static std::atomic<unsigned> buffer_c_str_accesses { 0 };
-
-  static bool buffer_track_c_str = get_env_bool("CEPH_BUFFER_TRACK");
-
-  void buffer::track_c_str(bool b) {
-    buffer_track_c_str = b;
-  }
-  int buffer::get_c_str_accesses() {
-    return buffer_c_str_accesses;
-  }
-
-#ifdef CEPH_HAVE_SETPIPE_SZ
-  static std::atomic<unsigned> buffer_max_pipe_size { 0 };
-  int update_max_pipe_size() {
-    char buf[32];
-    int r;
-    std::string err;
-    struct stat stat_result;
-    if (::stat(PROCPREFIX "/proc/sys/fs/pipe-max-size", &stat_result) == -1)
-      return -errno;
-    r = safe_read_file(PROCPREFIX "/proc/sys/fs/", "pipe-max-size",
-		       buf, sizeof(buf) - 1);
-    if (r < 0)
-      return r;
-    buf[r] = '\0';
-    size_t size = strict_strtol(buf, 10, &err);
-    if (!err.empty())
-      return -EIO;
-    buffer_max_pipe_size = size;
-    return 0;
-  }
-
-  size_t get_max_pipe_size() {
-    size_t size = buffer_max_pipe_size;
-    if (size)
-      return size;
-    if (update_max_pipe_size() == 0)
-      return buffer_max_pipe_size;
-    // this is the max size hardcoded in linux before 2.6.35
-    return 65536;
-  }
-#else
-  size_t get_max_pipe_size() { return 65536; }
-#endif
-
 
   const char * buffer::error::what() const throw () {
     return "buffer::exception";
@@ -180,11 +99,6 @@ using namespace ceph;
 		 int mempool)
       : raw(dataptr, l, mempool),
 	alignment(align) {
-      inc_total_alloc(len);
-      inc_history_alloc(len);
-    }
-    ~raw_combined() override {
-      dec_total_alloc(len);
     }
     raw* clone_empty() override {
       return create(len, alignment);
@@ -233,18 +147,14 @@ using namespace ceph;
       } else {
 	data = 0;
       }
-      inc_total_alloc(len);
-      inc_history_alloc(len);
-      bdout << "raw_malloc " << this << " alloc " << (void *)data << " " << l << " " << buffer::get_total_alloc() << bendl;
+      bdout << "raw_malloc " << this << " alloc " << (void *)data << " " << l << bendl;
     }
     raw_malloc(unsigned l, char *b) : raw(b, l) {
-      inc_total_alloc(len);
-      bdout << "raw_malloc " << this << " alloc " << (void *)data << " " << l << " " << buffer::get_total_alloc() << bendl;
+      bdout << "raw_malloc " << this << " alloc " << (void *)data << " " << l << bendl;
     }
     ~raw_malloc() override {
       free(data);
-      dec_total_alloc(len);
-      bdout << "raw_malloc " << this << " free " << (void *)data << " " << buffer::get_total_alloc() << bendl;
+      bdout << "raw_malloc " << this << " free " << (void *)data << " " << bendl;
     }
     raw* clone_empty() override {
       return new raw_malloc(len);
@@ -269,14 +179,12 @@ using namespace ceph;
 #endif /* DARWIN */
       if (!data)
 	throw bad_alloc();
-      inc_total_alloc(len);
-      inc_history_alloc(len);
-      bdout << "raw_posix_aligned " << this << " alloc " << (void *)data << " l=" << l << ", align=" << align << " total_alloc=" << buffer::get_total_alloc() << bendl;
+      bdout << "raw_posix_aligned " << this << " alloc " << (void *)data
+	    << " l=" << l << ", align=" << align << bendl;
     }
     ~raw_posix_aligned() override {
       ::free(data);
-      dec_total_alloc(len);
-      bdout << "raw_posix_aligned " << this << " free " << (void *)data << " " << buffer::get_total_alloc() << bendl;
+      bdout << "raw_posix_aligned " << this << " free " << (void *)data << bendl;
     }
     raw* clone_empty() override {
       return new raw_posix_aligned(len, align);
@@ -297,8 +205,6 @@ using namespace ceph;
 	data = realdata + align - off;
       else
 	data = realdata;
-      inc_total_alloc(len+align-1);
-      inc_history_alloc(len+align-1);
       //cout << "hack aligned " << (unsigned)data
       //<< " in raw " << (unsigned)realdata
       //<< " off " << off << std::endl;
@@ -306,7 +212,6 @@ using namespace ceph;
     }
     ~raw_hack_aligned() {
       delete[] realdata;
-      dec_total_alloc(len+align-1);
     }
     raw* clone_empty() {
       return new raw_hack_aligned(len, align);
@@ -326,18 +231,14 @@ using namespace ceph;
 	data = new char[len];
       else
 	data = 0;
-      inc_total_alloc(len);
-      inc_history_alloc(len);
-      bdout << "raw_char " << this << " alloc " << (void *)data << " " << l << " " << buffer::get_total_alloc() << bendl;
+      bdout << "raw_char " << this << " alloc " << (void *)data << " " << l << bendl;
     }
     raw_char(unsigned l, char *b) : raw(b, l) {
-      inc_total_alloc(len);
-      bdout << "raw_char " << this << " alloc " << (void *)data << " " << l << " " << buffer::get_total_alloc() << bendl;
+      bdout << "raw_char " << this << " alloc " << (void *)data << " " << l << bendl;
     }
     ~raw_char() override {
       delete[] data;
-      dec_total_alloc(len);
-      bdout << "raw_char " << this << " free " << (void *)data << " " << buffer::get_total_alloc() << bendl;
+      bdout << "raw_char " << this << " free " << (void *)data << bendl;
     }
     raw* clone_empty() override {
       return new raw_char(len);
@@ -349,14 +250,12 @@ using namespace ceph;
     MEMPOOL_CLASS_HELPERS();
 
     explicit raw_claimed_char(unsigned l, char *b) : raw(b, l) {
-      inc_total_alloc(len);
       bdout << "raw_claimed_char " << this << " alloc " << (void *)data
-	    << " " << l << " " << buffer::get_total_alloc() << bendl;
+	    << " " << l << bendl;
     }
     ~raw_claimed_char() override {
-      dec_total_alloc(len);
       bdout << "raw_claimed_char " << this << " free " << (void *)data
-	    << " " << buffer::get_total_alloc() << bendl;
+	    << bendl;
     }
     raw* clone_empty() override {
       return new raw_char(len);
@@ -639,14 +538,18 @@ using namespace ceph;
     if (_raw) {
       bdout << "ptr " << this << " release " << _raw << bendl;
       if (--_raw->nref == 0) {
+        // BE CAREFUL: this is called also for hypercombined ptr_node. After
+        // freeing underlying raw, `*this` can become inaccessible as well!
+        const auto* delete_raw = _raw;
+        _raw = nullptr;
 	//cout << "hosing raw " << (void*)_raw << " len " << _raw->len << std::endl;
         ANNOTATE_HAPPENS_AFTER(&_raw->nref);
         ANNOTATE_HAPPENS_BEFORE_FORGET_ALL(&_raw->nref);
-	delete _raw;  // dealloc old (if any)
+	delete delete_raw;  // dealloc old (if any)
       } else {
         ANNOTATE_HAPPENS_BEFORE(&_raw->nref);
+        _raw = nullptr;
       }
-      _raw = 0;
     }
   }
 
@@ -672,26 +575,18 @@ using namespace ceph;
 
   const char *buffer::ptr::c_str() const {
     ceph_assert(_raw);
-    if (buffer_track_c_str)
-      buffer_c_str_accesses++;
     return _raw->get_data() + _off;
   }
   char *buffer::ptr::c_str() {
     ceph_assert(_raw);
-    if (buffer_track_c_str)
-      buffer_c_str_accesses++;
     return _raw->get_data() + _off;
   }
   const char *buffer::ptr::end_c_str() const {
     ceph_assert(_raw);
-    if (buffer_track_c_str)
-      buffer_c_str_accesses++;
     return _raw->get_data() + _off + _len;
   }
   char *buffer::ptr::end_c_str() {
     ceph_assert(_raw);
-    if (buffer_track_c_str)
-      buffer_c_str_accesses++;
     return _raw->get_data() + _off + _len;
   }
 
@@ -824,7 +719,7 @@ using namespace ceph;
 
   template<bool is_const>
   buffer::list::iterator_impl<is_const>::iterator_impl(bl_t *l, unsigned o)
-    : bl(l), ls(&bl->_buffers), off(0), p(ls->begin()), p_off(0)
+    : bl(l), ls(&bl->_buffers), p(ls->begin()), off(0), p_off(0)
   {
     advance(o);
   }
@@ -1085,13 +980,11 @@ using namespace ceph;
     if (p == ls->end())
       seek(off);
     unsigned left = len;
-    for (std::list<ptr>::const_iterator i = otherl._buffers.begin();
-	 i != otherl._buffers.end();
-	 ++i) {
-      unsigned l = (*i).length();
+    for (const auto& node : otherl._buffers) {
+      unsigned l = node.length();
       if (left < l)
 	l = left;
-      copy_in(l, i->c_str());
+      copy_in(l, node.c_str());
       left -= l;
       if (left == 0)
 	break;
@@ -1127,10 +1020,10 @@ using namespace ceph;
 
     // buffer-wise comparison
     if (true) {
-      std::list<ptr>::const_iterator a = _buffers.begin();
-      std::list<ptr>::const_iterator b = other._buffers.begin();
+      auto a = std::cbegin(_buffers);
+      auto b = std::cbegin(other._buffers);
       unsigned aoff = 0, boff = 0;
-      while (a != _buffers.end()) {
+      while (a != std::cend(_buffers)) {
 	unsigned len = a->length() - aoff;
 	if (len > b->length() - boff)
 	  len = b->length() - boff;
@@ -1147,7 +1040,7 @@ using namespace ceph;
 	  ++b;
 	}
       }
-      ceph_assert(b == other._buffers.end());
+      ceph_assert(b == std::cend(other._buffers));
       return true;
     }
 
@@ -1165,50 +1058,49 @@ using namespace ceph;
     }
   }
 
-  bool buffer::list::is_provided_buffer(const char *dst) const
+  bool buffer::list::is_provided_buffer(const char* const dst) const
   {
-    if (_buffers.empty())
+    if (_buffers.empty()) {
       return false;
+    }
     return (is_contiguous() && (_buffers.front().c_str() == dst));
   }
 
-  bool buffer::list::is_aligned(unsigned align) const
+  bool buffer::list::is_aligned(const unsigned align) const
   {
-    for (std::list<ptr>::const_iterator it = _buffers.begin();
-	 it != _buffers.end();
-	 ++it) 
-      if (!it->is_aligned(align))
+    for (const auto& node : _buffers) {
+      if (!node.is_aligned(align)) {
 	return false;
+      }
+    }
     return true;
   }
 
-  bool buffer::list::is_n_align_sized(unsigned align) const
+  bool buffer::list::is_n_align_sized(const unsigned align) const
   {
-    for (std::list<ptr>::const_iterator it = _buffers.begin();
-	 it != _buffers.end();
-	 ++it) 
-      if (!it->is_n_align_sized(align))
+    for (const auto& node : _buffers) {
+      if (!node.is_n_align_sized(align)) {
 	return false;
+      }
+    }
     return true;
   }
 
-  bool buffer::list::is_aligned_size_and_memory(unsigned align_size,
-						  unsigned align_memory) const
+  bool buffer::list::is_aligned_size_and_memory(
+    const unsigned align_size,
+    const unsigned align_memory) const
   {
-    for (std::list<ptr>::const_iterator it = _buffers.begin();
-	 it != _buffers.end();
-	 ++it) {
-      if (!it->is_aligned(align_memory) || !it->is_n_align_sized(align_size))
+    for (const auto& node : _buffers) {
+      if (!node.is_aligned(align_memory) || !node.is_n_align_sized(align_size)) {
 	return false;
+      }
     }
     return true;
   }
 
   bool buffer::list::is_zero() const {
-    for (std::list<ptr>::const_iterator it = _buffers.begin();
-	 it != _buffers.end();
-	 ++it) {
-      if (!it->is_zero()) {
+    for (const auto& node : _buffers) {
+      if (!node.is_zero()) {
 	return false;
       }
     }
@@ -1217,47 +1109,45 @@ using namespace ceph;
 
   void buffer::list::zero()
   {
-    for (std::list<ptr>::iterator it = _buffers.begin();
-	 it != _buffers.end();
-	 ++it)
-      it->zero();
+    for (auto& node : _buffers) {
+      node.zero();
+    }
   }
 
-  void buffer::list::zero(unsigned o, unsigned l)
+  void buffer::list::zero(const unsigned o, const unsigned l)
   {
     ceph_assert(o+l <= _len);
     unsigned p = 0;
-    for (std::list<ptr>::iterator it = _buffers.begin();
-	 it != _buffers.end();
-	 ++it) {
-      if (p + it->length() > o) {
-        if (p >= o && p+it->length() <= o+l) {
+    for (auto& node : _buffers) {
+      if (p + node.length() > o) {
+        if (p >= o && p+node.length() <= o+l) {
           // 'o'------------- l -----------|
-          //      'p'-- it->length() --|
-	  it->zero();
+          //      'p'-- node.length() --|
+	  node.zero();
         } else if (p >= o) {
           // 'o'------------- l -----------|
-          //    'p'------- it->length() -------|
-	  it->zero(0, o+l-p);
-        } else if (p + it->length() <= o+l) {
+          //    'p'------- node.length() -------|
+	  node.zero(0, o+l-p);
+        } else if (p + node.length() <= o+l) {
           //     'o'------------- l -----------|
-          // 'p'------- it->length() -------|
-	  it->zero(o-p, it->length()-(o-p));
+          // 'p'------- node.length() -------|
+	  node.zero(o-p, node.length()-(o-p));
         } else {
           //       'o'----------- l -----------|
-          // 'p'---------- it->length() ----------|
-          it->zero(o-p, l);
+          // 'p'---------- node.length() ----------|
+          node.zero(o-p, l);
         }
       }
-      p += it->length();
-      if (o+l <= p)
+      p += node.length();
+      if (o+l <= p) {
 	break;  // done
+      }
     }
   }
 
   bool buffer::list::is_contiguous() const
   {
-    return &(*_buffers.begin()) == &(*_buffers.rbegin());
+    return _buffers.size() <= 1;
   }
 
   bool buffer::list::is_n_page_sized() const
@@ -1327,30 +1217,28 @@ using namespace ceph;
   void buffer::list::rebuild()
   {
     if (_len == 0) {
-      _buffers.clear();
+      _buffers.clear_and_dispose();
       return;
     }
-    ptr nb;
     if ((_len & ~CEPH_PAGE_MASK) == 0)
-      nb = buffer::create_page_aligned(_len);
+      rebuild(ptr_node::create(buffer::create_page_aligned(_len)));
     else
-      nb = buffer::create(_len);
-    rebuild(nb);
+      rebuild(ptr_node::create(buffer::create(_len)));
   }
 
-  void buffer::list::rebuild(ptr& nb)
+  void buffer::list::rebuild(
+    std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer> nb)
   {
     unsigned pos = 0;
-    for (std::list<ptr>::iterator it = _buffers.begin();
-	 it != _buffers.end();
-	 ++it) {
-      nb.copy_in(pos, it->length(), it->c_str(), false);
-      pos += it->length();
+    for (auto& node : _buffers) {
+      nb->copy_in(pos, node.length(), node.c_str(), false);
+      pos += node.length();
     }
     _memcopy_count += pos;
-    _buffers.clear();
-    if (nb.length())
-      _buffers.push_back(nb);
+    _buffers.clear_and_dispose();
+    if (likely(nb->length())) {
+      _buffers.push_back(*nb.release());
+    }
     invalidate_crc();
     last_p = begin();
   }
@@ -1370,8 +1258,9 @@ using namespace ceph;
 	&& _len > (max_buffers * align_size)) {
       align_size = round_up_to(round_up_to(_len, max_buffers) / max_buffers, align_size);
     }
-    std::list<ptr>::iterator p = _buffers.begin();
-    while (p != _buffers.end()) {
+    auto p = std::begin(_buffers);
+    auto p_prev = _buffers.before_begin();
+    while (p != std::end(_buffers)) {
       // keep anything that's already align and sized aligned
       if (p->is_aligned(align_memory) && p->is_n_align_sized(align_size)) {
         /*cout << " segment " << (void*)p->c_str()
@@ -1379,7 +1268,7 @@ using namespace ceph;
   	     << " length " << p->length()
   	     << " " << (p->length() & (align - 1)) << " ok" << std::endl;
         */
-        ++p;
+        p_prev = p++;
         continue;
       }
       
@@ -1394,18 +1283,23 @@ using namespace ceph;
   	     << " not ok" << std::endl;
         */
         offset += p->length();
-        unaligned.push_back(*p);
-        _buffers.erase(p++);
-      } while (p != _buffers.end() &&
+        // no need to reallocate, relinking is enough thankfully to bi::list.
+        auto p_after = _buffers.erase_after(p_prev);
+        unaligned._buffers.push_back(*p);
+        unaligned._len += p->length();
+        p = p_after;
+      } while (p != std::end(_buffers) &&
   	     (!p->is_aligned(align_memory) ||
   	      !p->is_n_align_sized(align_size) ||
   	      (offset % align_size)));
       if (!(unaligned.is_contiguous() && unaligned._buffers.front().is_aligned(align_memory))) {
-        ptr nb(buffer::create_aligned(unaligned._len, align_memory));
-        unaligned.rebuild(nb);
+        unaligned.rebuild(
+          ptr_node::create(
+            buffer::create_aligned(unaligned._len, align_memory)));
         _memcopy_count += unaligned._len;
       }
-      _buffers.insert(p, unaligned._buffers.front());
+      _buffers.insert_after(p_prev, *ptr_node::create(unaligned._buffers.front()).release());
+      ++p_prev;
     }
     last_p = begin();
 
@@ -1439,7 +1333,7 @@ using namespace ceph;
     _len += bl._len;
     if (!(flags & CLAIM_ALLOW_NONSHAREABLE))
       bl.make_shareable();
-    _buffers.splice(_buffers.end(), bl._buffers );
+    _buffers.splice_back(bl._buffers);
     bl._len = 0;
     bl.last_p = bl.begin();
   }
@@ -1447,9 +1341,8 @@ using namespace ceph;
   void buffer::list::claim_append_piecewise(list& bl)
   {
     // steal the other guy's buffers
-    for (std::list<buffer::ptr>::const_iterator i = bl.buffers().begin();
-        i != bl.buffers().end(); ++i) {
-      append(*i, 0, i->length());
+    for (const auto& node : bl.buffers()) {
+      append(node, 0, node.length());
     }
     bl.clear();
   }
@@ -1537,13 +1430,11 @@ using namespace ceph;
 
   void buffer::list::append(const ptr& bp)
   {
-    if (bp.length())
       push_back(bp);
   }
 
   void buffer::list::append(ptr&& bp)
   {
-    if (bp.length())
       push_back(std::move(bp));
   }
 
@@ -1561,16 +1452,15 @@ using namespace ceph;
       }
     }
     // add new item to list
-    push_back(ptr(bp, off, len));
+    push_back(ptr_node::create(bp, off, len));
   }
 
   void buffer::list::append(const list& bl)
   {
     _len += bl._len;
-    for (std::list<ptr>::const_iterator p = bl._buffers.begin();
-	 p != bl._buffers.end();
-	 ++p) 
-      _buffers.push_back(*p);
+    for (const auto& node : bl._buffers) {
+      _buffers.push_back(*ptr_node::create(node).release());
+    }
   }
 
   void buffer::list::append(std::istream& in)
@@ -1600,15 +1490,15 @@ using namespace ceph;
     append_buffer.set_length(append_buffer.length() + len);
     append(append_buffer, append_buffer.length() - len, len);
 
-    return { std::prev(std::end(_buffers))->end_c_str() - len };
+    return { _buffers.back().end_c_str() - len };
   }
 
   void buffer::list::prepend_zero(unsigned len)
   {
-    ptr bp(len);
-    bp.zero(false);
+    auto bp = ptr_node::create(len);
+    bp->zero(false);
     _len += len;
-    _buffers.emplace_front(std::move(bp));
+    _buffers.push_front(*bp.release());
   }
   
   void buffer::list::append_zero(unsigned len)
@@ -1620,9 +1510,9 @@ using namespace ceph;
       len -= need;
     }
     if (len) {
-      ptr bp = buffer::create_page_aligned(len);
-      bp.zero(false);
-      append(std::move(bp));
+      auto bp = ptr_node::create(buffer::create_page_aligned(len));
+      bp->zero(false);
+      push_back(std::move(bp));
     }
   }
 
@@ -1635,14 +1525,12 @@ using namespace ceph;
     if (n >= _len)
       throw end_of_buffer();
     
-    for (std::list<ptr>::const_iterator p = _buffers.begin();
-	 p != _buffers.end();
-	 ++p) {
-      if (n >= p->length()) {
-	n -= p->length();
+    for (const auto& node : _buffers) {
+      if (n >= node.length()) {
+	n -= node.length();
 	continue;
       }
-      return (*p)[n];
+      return node[n];
     }
     ceph_abort();
   }
@@ -1655,22 +1543,21 @@ using namespace ceph;
     if (_buffers.empty())
       return 0;                         // no buffers
 
-    std::list<ptr>::const_iterator iter = _buffers.begin();
+    auto iter = std::cbegin(_buffers);
     ++iter;
 
-    if (iter != _buffers.end())
+    if (iter != std::cend(_buffers)) {
       rebuild();
+    }
     return _buffers.front().c_str();  // good, we're already contiguous.
   }
 
   string buffer::list::to_str() const {
     string s;
     s.reserve(length());
-    for (std::list<ptr>::const_iterator p = _buffers.begin();
-	 p != _buffers.end();
-	 ++p) {
-      if (p->length()) {
-	s.append(p->c_str(), p->length());
+    for (const auto& node : _buffers) {
+      if (node.length()) {
+	s.append(node.c_str(), node.length());
       }
     }
     return s;
@@ -1684,21 +1571,20 @@ using namespace ceph;
     clear();
 
     // skip off
-    std::list<ptr>::const_iterator curbuf = other._buffers.begin();
-    while (off > 0 &&
-	   off >= curbuf->length()) {
+    auto curbuf = std::cbegin(other._buffers);
+    while (off > 0 && off >= curbuf->length()) {
       // skip this buffer
       //cout << "skipping over " << *curbuf << std::endl;
       off -= (*curbuf).length();
       ++curbuf;
     }
-    ceph_assert(len == 0 || curbuf != other._buffers.end());
+    ceph_assert(len == 0 || curbuf != std::cend(other._buffers));
     
     while (len > 0) {
       // partial?
       if (off + len < curbuf->length()) {
 	//cout << "copying partial of " << *curbuf << std::endl;
-	_buffers.push_back( ptr( *curbuf, off, len ) );
+	_buffers.push_back(*ptr_node::create( *curbuf, off, len ).release());
 	_len += len;
 	break;
       }
@@ -1706,7 +1592,7 @@ using namespace ceph;
       // through end
       //cout << "copying end (all?) of " << *curbuf << std::endl;
       unsigned howmuch = curbuf->length() - off;
-      _buffers.push_back( ptr( *curbuf, off, howmuch ) );
+      _buffers.push_back(*ptr_node::create( *curbuf, off, howmuch ).release());
       _len += howmuch;
       len -= howmuch;
       off = 0;
@@ -1727,14 +1613,15 @@ using namespace ceph;
     //cout << "splice off " << off << " len " << len << " ... mylen = " << length() << std::endl;
       
     // skip off
-    std::list<ptr>::iterator curbuf = _buffers.begin();
+    auto curbuf = std::begin(_buffers);
+    auto curbuf_prev = _buffers.before_begin();
     while (off > 0) {
-      ceph_assert(curbuf != _buffers.end());
+      ceph_assert(curbuf != std::end(_buffers));
       if (off >= (*curbuf).length()) {
 	// skip this buffer
 	//cout << "off = " << off << " skipping over " << *curbuf << std::endl;
 	off -= (*curbuf).length();
-	++curbuf;
+	curbuf_prev = curbuf++;
       } else {
 	// somewhere in this buffer!
 	//cout << "off = " << off << " somewhere in " << *curbuf << std::endl;
@@ -1746,8 +1633,10 @@ using namespace ceph;
       // add a reference to the front bit
       //  insert it before curbuf (which we'll hose)
       //cout << "keeping front " << off << " of " << *curbuf << std::endl;
-      _buffers.insert( curbuf, ptr( *curbuf, 0, off ) );
+      _buffers.insert_after(curbuf_prev,
+			    *ptr_node::create(*curbuf, 0, off).release());
       _len += off;
+      ++curbuf_prev;
     }
     
     while (len > 0) {
@@ -1769,7 +1658,7 @@ using namespace ceph;
       if (claim_by) 
 	claim_by->append( *curbuf, off, howmuch );
       _len -= (*curbuf).length();
-      _buffers.erase( curbuf++ );
+      curbuf = _buffers.erase_after_and_dispose(curbuf_prev);
       len -= howmuch;
       off = 0;
     }
@@ -1783,19 +1672,11 @@ using namespace ceph;
   {
     list s;
     s.substr_of(*this, off, len);
-    for (std::list<ptr>::const_iterator it = s._buffers.begin(); 
-	 it != s._buffers.end(); 
-	 ++it)
-      if (it->length())
-	out.write(it->c_str(), it->length());
-    /*iterator p(this, off);
-      while (len > 0 && !p.end()) {
-      int l = p.left_in_this_buf();
-      if (l > len)
-      l = len;
-      out.write(p.c_str(), l);
-      len -= l;
-      }*/
+    for (const auto& node : s._buffers) {
+      if (node.length()) {
+	out.write(node.c_str(), node.length());
+      }
+    }
   }
   
 void buffer::list::encode_base64(buffer::list& o)
@@ -1869,11 +1750,11 @@ int buffer::list::read_file(const char *fn, std::string *error)
 
 ssize_t buffer::list::read_fd(int fd, size_t len)
 {
-  bufferptr bp = buffer::create(len);
-  ssize_t ret = safe_read(fd, (void*)bp.c_str(), len);
+  auto bp = ptr_node::create(buffer::create(len));
+  ssize_t ret = safe_read(fd, (void*)bp->c_str(), len);
   if (ret >= 0) {
-    bp.set_length(ret);
-    append(std::move(bp));
+    bp->set_length(ret);
+    push_back(std::move(bp));
   }
   return ret;
 }
@@ -1949,8 +1830,8 @@ int buffer::list::write_fd(int fd) const
   int iovlen = 0;
   ssize_t bytes = 0;
 
-  std::list<ptr>::const_iterator p = _buffers.begin();
-  while (p != _buffers.end()) {
+  auto p = std::cbegin(_buffers);
+  while (p != std::cend(_buffers)) {
     if (p->length() > 0) {
       iov[iovlen].iov_base = (void *)p->c_str();
       iov[iovlen].iov_len = p->length();
@@ -1998,8 +1879,8 @@ int buffer::list::write_fd(int fd, uint64_t offset) const
 {
   iovec iov[IOV_MAX];
 
-  std::list<ptr>::const_iterator p = _buffers.begin();
-  uint64_t left_pbrs = _buffers.size();
+  auto p = std::cbegin(_buffers);
+  uint64_t left_pbrs = std::size(_buffers);
   while (left_pbrs) {
     ssize_t bytes = 0;
     unsigned iovlen = 0;
@@ -2028,12 +1909,10 @@ __u32 buffer::list::crc32c(__u32 crc) const
   int cache_hits = 0;
   int cache_adjusts = 0;
 
-  for (std::list<ptr>::const_iterator it = _buffers.begin();
-       it != _buffers.end();
-       ++it) {
-    if (it->length()) {
-      raw *r = it->get_raw();
-      pair<size_t, size_t> ofs(it->offset(), it->offset() + it->length());
+  for (const auto& node : _buffers) {
+    if (node.length()) {
+      raw* const r = node.get_raw();
+      pair<size_t, size_t> ofs(node.offset(), node.offset() + node.length());
       pair<uint32_t, uint32_t> ccrc;
       if (r->get_crc(ofs, &ccrc)) {
 	if (ccrc.first == crc) {
@@ -2049,13 +1928,13 @@ __u32 buffer::list::crc32c(__u32 crc) const
 	   * http://crcutil.googlecode.com/files/crc-doc.1.0.pdf
 	   * note, u for our crc32c implementation is 0
 	   */
-	  crc = ccrc.second ^ ceph_crc32c(ccrc.first ^ crc, NULL, it->length());
+	  crc = ccrc.second ^ ceph_crc32c(ccrc.first ^ crc, NULL, node.length());
 	  cache_adjusts++;
 	}
       } else {
 	cache_misses++;
 	uint32_t base = crc;
-	crc = ceph_crc32c(crc, (unsigned char*)it->c_str(), it->length());
+	crc = ceph_crc32c(crc, (unsigned char*)node.c_str(), node.length());
 	r->set_crc(ofs, make_pair(base, crc));
       }
     }
@@ -2075,8 +1954,8 @@ __u32 buffer::list::crc32c(__u32 crc) const
 
 void buffer::list::invalidate_crc()
 {
-  for (std::list<ptr>::const_iterator p = _buffers.begin(); p != _buffers.end(); ++p) {
-    raw *r = p->get_raw();
+  for (const auto& node : _buffers) {
+    raw* const r = node.get_raw();
     if (r) {
       r->invalidate_crc();
     }
@@ -2102,9 +1981,9 @@ sha1_digest_t buffer::list::sha1()
  */
 void buffer::list::write_stream(std::ostream &out) const
 {
-  for (std::list<ptr>::const_iterator p = _buffers.begin(); p != _buffers.end(); ++p) {
-    if (p->length() > 0) {
-      out.write(p->c_str(), p->length());
+  for (const auto& node : _buffers) {
+    if (node.length() > 0) {
+      out.write(node.c_str(), node.length());
     }
   }
 }
@@ -2184,7 +2063,7 @@ void buffer::list::hexdump(std::ostream &out, bool trailing_newline) const
 
 buffer::list buffer::list::static_from_mem(char* c, size_t l) {
   list bl;
-  bl.push_back(ptr(create_static(l, c)));
+  bl.push_back(ptr_node::create(create_static(l, c)));
   return bl;
 }
 
@@ -2198,6 +2077,29 @@ buffer::list buffer::list::static_from_string(string& s) {
   return static_from_mem(const_cast<char*>(s.data()), s.length());
   // But the way buffer::list mostly doesn't work in a sane way with
   // const makes me generally sad.
+}
+
+bool buffer::ptr_node::dispose_if_hypercombined(
+  buffer::ptr_node* const delete_this)
+{
+  const bool is_hypercombined = static_cast<void*>(delete_this) == \
+    static_cast<void*>(&delete_this->get_raw()->bptr_storage);
+  if (is_hypercombined) {
+    delete_this->~ptr_node();
+  }
+  return is_hypercombined;
+}
+
+std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer>
+buffer::ptr_node::create_hypercombined(buffer::raw* const r)
+{
+  if (likely(r->nref == 0)) {
+    return std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer>(
+      new (&r->bptr_storage) ptr_node(r));
+  } else {
+    return std::unique_ptr<buffer::ptr_node, buffer::ptr_node::disposer>(
+      new ptr_node(r));
+  }
 }
 
 std::ostream& buffer::operator<<(std::ostream& out, const buffer::raw &r) {
@@ -2219,11 +2121,11 @@ std::ostream& buffer::operator<<(std::ostream& out, const buffer::ptr& bp) {
 std::ostream& buffer::operator<<(std::ostream& out, const buffer::list& bl) {
   out << "buffer::list(len=" << bl.length() << "," << std::endl;
 
-  std::list<buffer::ptr>::const_iterator it = bl.buffers().begin();
-  while (it != bl.buffers().end()) {
-    out << "\t" << *it;
-    if (++it == bl.buffers().end()) break;
-    out << "," << std::endl;
+  for (const auto& node : bl.buffers()) {
+    out << "\t" << node;
+    if (&node != &bl.buffers().back()) {
+      out << "," << std::endl;
+    }
   }
   out << std::endl << ")";
   return out;

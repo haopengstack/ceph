@@ -107,6 +107,7 @@ READ_ONLY_ROLE = Role('read-only', 'Read-Only', dict([
 # block manager role provides all permission for block related scopes
 BLOCK_MGR_ROLE = Role('block-manager', 'Block Manager', {
     Scope.RBD_IMAGE: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
+    Scope.POOL: [_P.READ],
     Scope.ISCSI: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
     Scope.RBD_MIRRORING: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
 })
@@ -313,8 +314,8 @@ class AccessControlDB(object):
         logger.debug("AC: Checking for previews DB versions")
         if self.VERSION == 1:  # current version
             # check if there is username/password from previous version
-            username = mgr.get_config('username', None)
-            password = mgr.get_config('password', None)
+            username = mgr.get_module_option('username', None)
+            password = mgr.get_module_option('password', None)
             if username and password:
                 logger.debug("AC: Found single user credentials: user=%s",
                              username)

@@ -18,11 +18,13 @@ import { ConfigurationComponent } from './configuration/configuration.component'
 import { CrushmapComponent } from './crushmap/crushmap.component';
 import { HostDetailsComponent } from './hosts/host-details/host-details.component';
 import { HostsComponent } from './hosts/hosts.component';
+import { LogsComponent } from './logs/logs.component';
 import { MonitorComponent } from './monitor/monitor.component';
 import { OsdDetailsComponent } from './osd/osd-details/osd-details.component';
 import { OsdFlagsModalComponent } from './osd/osd-flags-modal/osd-flags-modal.component';
 import { OsdListComponent } from './osd/osd-list/osd-list.component';
 import { OsdPerformanceHistogramComponent } from './osd/osd-performance-histogram/osd-performance-histogram.component';
+import { OsdRecvSpeedModalComponent } from './osd/osd-recv-speed-modal/osd-recv-speed-modal.component';
 import { OsdReweightModalComponent } from './osd/osd-reweight-modal/osd-reweight-modal.component';
 import { OsdScrubModalComponent } from './osd/osd-scrub-modal/osd-scrub-modal.component';
 
@@ -31,6 +33,7 @@ import { OsdScrubModalComponent } from './osd/osd-scrub-modal/osd-scrub-modal.co
     OsdDetailsComponent,
     OsdScrubModalComponent,
     OsdFlagsModalComponent,
+    OsdRecvSpeedModalComponent,
     OsdReweightModalComponent
   ],
   imports: [
@@ -60,7 +63,9 @@ import { OsdScrubModalComponent } from './osd/osd-scrub-modal/osd-scrub-modal.co
     ConfigurationDetailsComponent,
     ConfigurationFormComponent,
     OsdReweightModalComponent,
-    CrushmapComponent
+    CrushmapComponent,
+    LogsComponent,
+    OsdRecvSpeedModalComponent
   ]
 })
 export class ClusterModule {}

@@ -33,13 +33,9 @@ function install_seastar_deps {
 }
 
 function munge_ceph_spec_in {
+    # http://rpm.org/user_doc/conditional_builds.html
     local OUTFILE=$1
     sed -e 's/@//g' -e 's/%bcond_with make_check/%bcond_without make_check/g' < ceph.spec.in > $OUTFILE
-    if type python2 > /dev/null 2>&1 ; then
-        sed -i -e 's/%bcond_with python2/%bcond_without python2/g' $OUTFILE
-    else
-        sed -i -e 's/%bcond_without python2/%bcond_with python2/g' $OUTFILE
-    fi
     if [ $WITH_SEASTAR ]; then
         sed -i -e 's/%bcond_with seastar/%bcond_without seastar/g' $OUTFILE
     fi
@@ -216,16 +212,18 @@ if [ x$(uname)x = xFreeBSDx ]; then
         java/junit \
         lang/python \
         lang/python27 \
+        lang/python36 \
         devel/py-pip \
+        devel/py-flake8 \
         devel/py-argparse \
         devel/py-nose \
         devel/py-prettytable \
-	www/py-routes \
+        www/py-routes \
         www/py-flask \
-	www/node \
-	www/npm \
+        www/node \
+        www/npm \
         www/fcgi \
-	security/oath-toolkit \
+        security/oath-toolkit \
         sysutils/flock \
         sysutils/fusefs-libs \
 
@@ -293,7 +291,6 @@ else
 	    $SUDO yum-config-manager --disable centos-sclo-rh || true
 	    $SUDO yum remove centos-release-scl || true
 	fi
-
         case $ID in
             fedora)
                 if test $yumdnf = yum; then
@@ -310,7 +307,6 @@ else
                 $SUDO rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-$VERSION_ID
                 $SUDO rm -f /etc/yum.repos.d/dl.fedoraproject.org*
                 if test $ID = centos -a $VERSION_ID = 7 ; then
-                    $SUDO yum-config-manager --enable cr
 		    case $(uname -m) in
 			x86_64)
 			    $SUDO yum -y install centos-release-scl
@@ -326,8 +322,6 @@ else
                 elif test $ID = rhel -a $MAJOR_VERSION = 7 ; then
                     $SUDO yum-config-manager --enable rhel-server-rhscl-7-rpms
                     dts_ver=7
-                elif test $ID = virtuozzo -a $MAJOR_VERSION = 7 ; then
-                    $SUDO yum-config-manager --enable cr
                 fi
                 ;;
         esac

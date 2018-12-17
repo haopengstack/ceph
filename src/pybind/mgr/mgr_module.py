@@ -2,10 +2,12 @@
 import ceph_module  # noqa
 
 import logging
+import json
 import six
 import threading
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import rados
+import time
 
 PG_STATES = [
         "active",
@@ -82,7 +84,7 @@ class CommandResult(object):
     """
     Use with MgrModule.send_command
     """
-    def __init__(self, tag):
+    def __init__(self, tag=None):
         self.ev = threading.Event()
         self.outs = ""
         self.outb = ""
@@ -90,7 +92,7 @@ class CommandResult(object):
 
         # This is just a convenience for notifications from
         # C++ land, to avoid passing addresses around in messages.
-        self.tag = tag
+        self.tag = tag if tag else ""
 
     def complete(self, r, outb, outs):
         self.r = r
@@ -101,6 +103,17 @@ class CommandResult(object):
     def wait(self):
         self.ev.wait()
         return self.r, self.outb, self.outs
+
+
+class HandleCommandResult(namedtuple('HandleCommandResult', ['retval', 'stdout', 'stderr'])):
+    def __new__(cls, retval=0, odata="", rs=""):
+        """
+        Tuple containing the result of `handle_command()`
+        :param retval: return code. E.g. 0 or -errno.EINVAL
+        :param odata: data of this result.
+        :param rs: Typically used for error or status messages.
+        """
+        return super(HandleCommandResult, cls).__new__(cls, retval, odata, rs)
 
 
 class OSDMap(ceph_module.BasePyOSDMap):
@@ -219,7 +232,7 @@ class MgrStandbyModule(ceph_module.BaseMgrStandbyModule):
     def get_mgr_id(self):
         return self._ceph_get_mgr_id()
 
-    def get_config(self, key, default=None):
+    def get_module_option(self, key, default=None):
         """
         Retrieve the value of a persistent configuration setting
 
@@ -227,11 +240,14 @@ class MgrStandbyModule(ceph_module.BaseMgrStandbyModule):
         :param default: the default value of the config if it is not found
         :return: str
         """
-        r = self._ceph_get_config(key)
+        r = self._ceph_get_module_option(key)
         if r is None:
             return default
         else:
             return r
+
+    def get_ceph_option(self, key):
+        return self._ceph_get_option(key)
 
     def get_store(self, key):
         """
@@ -245,10 +261,10 @@ class MgrStandbyModule(ceph_module.BaseMgrStandbyModule):
     def get_active_uri(self):
         return self._ceph_get_active_uri()
 
-    def get_localized_config(self, key, default=None):
-        r = self.get_config(self.get_mgr_id() + '/' + key)
+    def get_localized_module_option(self, key, default=None):
+        r = self.get_module_option(self.get_mgr_id() + '/' + key)
         if r is None:
-            r = self.get_config(key)
+            r = self.get_module_option(key)
 
         if r is None:
             r = default
@@ -256,7 +272,7 @@ class MgrStandbyModule(ceph_module.BaseMgrStandbyModule):
 
 class MgrModule(ceph_module.BaseMgrModule):
     COMMANDS = []
-    OPTIONS = []
+    MODULE_OPTIONS = []
 
     # Priority definitions for perf counters
     PRIO_CRITICAL = 10
@@ -563,6 +579,28 @@ class MgrModule(ceph_module.BaseMgrModule):
         """
         return self._ceph_get_daemon_status(svc_type, svc_id)
 
+    def mon_command(self, cmd_dict):
+        """
+        Helper for modules that do simple, synchronous mon command
+        execution.
+
+        See send_command for general case.
+
+        :return: status int, out std, err str
+        """
+
+        t1 = time.time()
+        result = CommandResult()
+        self.send_command(result, "mon", "", json.dumps(cmd_dict), "")
+        r = result.wait()
+        t2 = time.time()
+
+        self.log.debug("mon_command: '{0}' -> {1} in {2:.3f}s".format(
+            cmd_dict['prefix'], r[0], t2 - t1
+        ))
+
+        return r
+
     def send_command(self, *args, **kwargs):
         """
         Called by the plugin to send a command to the mon
@@ -619,10 +657,12 @@ class MgrModule(ceph_module.BaseMgrModule):
         output string.  The output buffer is for data results,
         the output string is for informative text.
 
-        :param string inbuf: content of any "-i <file>" supplied to ceph cli
-        :param dict cmd: from Ceph's cmdmap_t
+        :param inbuf: content of any "-i <file>" supplied to ceph cli
+        :type inbuf: str
+        :param cmd: from Ceph's cmdmap_t
+        :type cmd: dict
 
-        :return: 3-tuple of (int, str, str)
+        :return: HandleCommandResult or a 3-tuple of (int, str, str)
         """
 
         # Should never get called if they didn't declare
@@ -638,35 +678,35 @@ class MgrModule(ceph_module.BaseMgrModule):
         """
         return self._ceph_get_mgr_id()
 
-    def get_option(self, key):
+    def get_ceph_option(self, key):
         return self._ceph_get_option(key)
 
-    def _validate_option(self, key):
+    def _validate_module_option(self, key):
         """
         Helper: don't allow get/set config callers to 
         access config options that they didn't declare
         in their schema.
         """
-        if key not in [o['name'] for o in self.OPTIONS]:
-            raise RuntimeError("Config option '{0}' is not in {1}.OPTIONS".\
+        if key not in [o['name'] for o in self.MODULE_OPTIONS]:
+            raise RuntimeError("Config option '{0}' is not in {1}.MODULE_OPTIONS".\
                     format(key, self.__class__.__name__))
 
-    def _get_config(self, key, default):
-        r = self._ceph_get_config(key)
+    def _get_module_option(self, key, default):
+        r = self._ceph_get_module_option(key)
         if r is None:
             return default
         else:
             return r
 
-    def get_config(self, key, default=None):
+    def get_module_option(self, key, default=None):
         """
         Retrieve the value of a persistent configuration setting
 
         :param str key:
         :return: str
         """
-        self._validate_option(key)
-        return self._get_config(key, default)
+        self._validate_module_option(key)
+        return self._get_module_option(key, default)
 
     def get_store_prefix(self, key_prefix):
         """
@@ -688,38 +728,38 @@ class MgrModule(ceph_module.BaseMgrModule):
     def _set_localized(self, key, val, setter):
         return setter(self.get_mgr_id() + '/' + key, val)
 
-    def get_localized_config(self, key, default=None):
+    def get_localized_module_option(self, key, default=None):
         """
         Retrieve localized configuration for this ceph-mgr instance
         :param str key:
         :param str default:
         :return: str
         """
-        self._validate_option(key)
-        return self._get_localized(key, default, self._get_config)
+        self._validate_module_option(key)
+        return self._get_localized(key, default, self._get_module_option)
 
-    def _set_config(self, key, val):
-        return self._ceph_set_config(key, val)
+    def _set_module_option(self, key, val):
+        return self._ceph_set_module_option(key, val)
 
-    def set_config(self, key, val):
+    def set_module_option(self, key, val):
         """
         Set the value of a persistent configuration setting
 
         :param str key:
         :param str val:
         """
-        self._validate_option(key)
-        return self._set_config(key, val)
+        self._validate_module_option(key)
+        return self._set_module_option(key, val)
 
-    def set_localized_config(self, key, val):
+    def set_localized_module_option(self, key, val):
         """
         Set localized configuration for this ceph-mgr instance
         :param str key:
         :param str default:
         :return: str
         """
-        self._validate_option(key)
-        return self._set_localized(key, val, self._set_config)
+        self._validate_module_option(key)
+        return self._set_localized(key, val, self._set_module_option)
 
     def set_store(self, key, val):
         """
@@ -917,7 +957,28 @@ class MgrModule(ceph_module.BaseMgrModule):
 
     def add_osd_perf_query(self, query):
         """
-        Fetch the daemon metadata for a particular service.
+        Register an OSD perf query.  Argument is a
+        dict of the query parameters, in this form:
+
+        ::
+
+           {
+             'key_descriptor': [
+               {'type': subkey_type, 'regex': regex_pattern},
+               ...
+             ],
+             'performance_counter_descriptors': [
+               list, of, descriptor, types
+             ],
+             'limit': {'order_by': performance_counter_type, 'max_count': n},
+           }
+
+        Valid subkey types:
+           'client_id', 'client_address', 'pool_id', 'namespace', 'osd_id',
+           'pg_id', 'object_name', 'snap_id'
+        Valid performance counter types:
+           'ops', 'write_ops', 'read_ops', 'bytes', 'write_bytes', 'read_bytes',
+           'latency', 'write_latency', 'read_latency'
 
         :param object query: query
         :rtype: int (query id)
@@ -926,8 +987,16 @@ class MgrModule(ceph_module.BaseMgrModule):
 
     def remove_osd_perf_query(self, query_id):
         """
-        Fetch the daemon metadata for a particular service.
+        Unregister an OSD perf query.
 
         :param int query_id: query ID
         """
         return self._ceph_remove_osd_perf_query(query_id)
+
+    def get_osd_perf_counters(self, query_id):
+        """
+        Get stats collected for an OSD perf query.
+
+        :param int query_id: query ID
+        """
+        return self._ceph_get_osd_perf_counters(query_id)

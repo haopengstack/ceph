@@ -1,5 +1,6 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
+
 #include <errno.h>
 
 #include "cls/rgw/cls_rgw_const.h"
@@ -92,18 +93,29 @@ bool BucketIndexAioManager::wait_for_completions(int valid_ret_code,
   return true;
 }
 
-void cls_rgw_bucket_init(ObjectWriteOperation& o)
+// note: currently only called by tesing code
+void cls_rgw_bucket_init_index(ObjectWriteOperation& o)
 {
   bufferlist in;
   o.exec(RGW_CLASS, RGW_BUCKET_INIT_INDEX, in);
 }
 
 static bool issue_bucket_index_init_op(librados::IoCtx& io_ctx,
-    const string& oid, BucketIndexAioManager *manager) {
+				       const string& oid,
+				       BucketIndexAioManager *manager) {
   bufferlist in;
   librados::ObjectWriteOperation op;
   op.create(true);
   op.exec(RGW_CLASS, RGW_BUCKET_INIT_INDEX, in);
+  return manager->aio_operate(io_ctx, oid, &op);
+}
+
+static bool issue_bucket_index_clean_op(librados::IoCtx& io_ctx,
+					const string& oid,
+					BucketIndexAioManager *manager) {
+  bufferlist in;
+  librados::ObjectWriteOperation op;
+  op.remove();
   return manager->aio_operate(io_ctx, oid, &op);
 }
 
@@ -126,9 +138,14 @@ int CLSRGWIssueBucketIndexInit::issue_op(int shard_id, const string& oid)
 void CLSRGWIssueBucketIndexInit::cleanup()
 {
   // Do best effort removal
-  for (map<int, string>::iterator citer = objs_container.begin(); citer != iter; ++citer) {
+  for (auto citer = objs_container.begin(); citer != iter; ++citer) {
     io_ctx.remove(citer->second);
   }
+}
+
+int CLSRGWIssueBucketIndexClean::issue_op(int shard_id, const string& oid)
+{
+  return issue_bucket_index_clean_op(io_ctx, oid, &manager);
 }
 
 int CLSRGWIssueSetTagTimeout::issue_op(int shard_id, const string& oid)
@@ -725,7 +742,7 @@ void cls_rgw_gc_remove(librados::ObjectWriteOperation& op, const vector<string>&
   op.exec(RGW_CLASS, RGW_GC_REMOVE, in);
 }
 
-int cls_rgw_lc_get_head(IoCtx& io_ctx, string& oid, cls_rgw_lc_obj_head& head)
+int cls_rgw_lc_get_head(IoCtx& io_ctx, const string& oid, cls_rgw_lc_obj_head& head)
 {
   bufferlist in, out;
   int r = io_ctx.exec(oid, RGW_CLASS, RGW_LC_GET_HEAD, in, out);
@@ -744,7 +761,7 @@ int cls_rgw_lc_get_head(IoCtx& io_ctx, string& oid, cls_rgw_lc_obj_head& head)
  return r;
 }
 
-int cls_rgw_lc_put_head(IoCtx& io_ctx, string& oid, cls_rgw_lc_obj_head& head)
+int cls_rgw_lc_put_head(IoCtx& io_ctx, const string& oid, cls_rgw_lc_obj_head& head)
 {
   bufferlist in, out;
   cls_rgw_lc_put_head_op call;
@@ -754,7 +771,7 @@ int cls_rgw_lc_put_head(IoCtx& io_ctx, string& oid, cls_rgw_lc_obj_head& head)
   return r;
 }
 
-int cls_rgw_lc_get_next_entry(IoCtx& io_ctx, string& oid, string& marker, pair<string, int>& entry)
+int cls_rgw_lc_get_next_entry(IoCtx& io_ctx, const string& oid, string& marker, pair<string, int>& entry)
 {
   bufferlist in, out;
   cls_rgw_lc_get_next_entry_op call;
@@ -776,7 +793,7 @@ int cls_rgw_lc_get_next_entry(IoCtx& io_ctx, string& oid, string& marker, pair<s
  return r;
 }
 
-int cls_rgw_lc_rm_entry(IoCtx& io_ctx, string& oid, pair<string, int>& entry)
+int cls_rgw_lc_rm_entry(IoCtx& io_ctx, const string& oid, const pair<string, int>& entry)
 {
   bufferlist in, out;
   cls_rgw_lc_rm_entry_op call;
@@ -786,7 +803,7 @@ int cls_rgw_lc_rm_entry(IoCtx& io_ctx, string& oid, pair<string, int>& entry)
  return r;
 }
 
-int cls_rgw_lc_set_entry(IoCtx& io_ctx, string& oid, pair<string, int>& entry)
+int cls_rgw_lc_set_entry(IoCtx& io_ctx, const string& oid, const pair<string, int>& entry)
 {
   bufferlist in, out;
   cls_rgw_lc_set_entry_op call;
@@ -796,7 +813,7 @@ int cls_rgw_lc_set_entry(IoCtx& io_ctx, string& oid, pair<string, int>& entry)
   return r;
 }
 
-int cls_rgw_lc_list(IoCtx& io_ctx, string& oid,
+int cls_rgw_lc_list(IoCtx& io_ctx, const string& oid,
                     const string& marker,
                     uint32_t max_entries,
                     map<string, int>& entries)

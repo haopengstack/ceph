@@ -20,7 +20,16 @@
           <i class="fa fa-fw fa-cog"
              aria-hidden="true">
           </i>
-          <ng-container i18n>Set Cluster-wide OSD Flags</ng-container>
+          <ng-container i18n>Set Cluster-wide Flags</ng-container>
+        </button>
+
+        <button class="btn btn-sm btn-default btn-label tc_configureCluster"
+                type="button"
+                (click)="configureQosParamsAction()">
+          <i class="fa fa-fw fa-cog"
+             aria-hidden="true">
+          </i>
+          <ng-container i18n>Set Cluster-wide Recovery Priority</ng-container>
         </button>
       </div>
 
@@ -54,12 +63,6 @@
   </tab>
 </tabset>
 
-<ng-template #osdUsageTpl
-             let-row="row">
-  <cd-usage-bar [totalBytes]="row.stats.stat_bytes"
-                [usedBytes]="row.stats.stat_bytes_used"></cd-usage-bar>
-</ng-template>
-
 <ng-template #markOsdConfirmationTpl
              let-markActionDescription="markActionDescription">
   <ng-container i18n><strong>OSD {{ selection.first().id }}</strong> will be marked
@@ -71,9 +74,7 @@
              let-actionDescription="actionDescription">
   <div *ngIf="!safeToDestroyResult['is_safe_to_destroy']"
        class="danger">
-    <cd-warning-panel i18n>
-      The OSD is not safe to destroy!
-    </cd-warning-panel>
+    <cd-warning-panel i18n>The OSD is not safe to destroy!</cd-warning-panel>
   </div>
   <ng-container i18n><strong>OSD {{ selection.first().id }}</strong> will be
   <strong>{{ actionDescription }}</strong> if you proceed.</ng-container>

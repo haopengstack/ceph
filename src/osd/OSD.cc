@@ -222,8 +222,8 @@ OSDService::OSDService(OSD *osd) :
   class_handler(osd->class_handler),
   osd_max_object_size(cct->_conf, "osd_max_object_size"),
   osd_skip_data_digest(cct->_conf, "osd_skip_data_digest"),
-  publish_lock("OSDService::publish_lock"),
-  pre_publish_lock("OSDService::pre_publish_lock"),
+  publish_lock{ceph::make_mutex("OSDService::publish_lock")},
+  pre_publish_lock{ceph::make_mutex("OSDService::pre_publish_lock")},
   max_oldest_map(0),
   peer_map_epoch_lock("OSDService::peer_map_epoch_lock"),
   sched_scrub_lock("OSDService::sched_scrub_lock"), scrubs_pending(0),
@@ -858,20 +858,15 @@ void OSDService::set_injectfull(s_names type, int64_t count)
 void OSDService::set_statfs(const struct store_statfs_t &stbuf)
 {
   uint64_t bytes = stbuf.total;
-  uint64_t used = bytes - stbuf.available;
   uint64_t avail = stbuf.available;
+  uint64_t used = stbuf.get_used_raw();
 
   osd->logger->set(l_osd_stat_bytes, bytes);
   osd->logger->set(l_osd_stat_bytes_used, used);
   osd->logger->set(l_osd_stat_bytes_avail, avail);
 
   std::lock_guard l(stat_lock);
-  osd_stat.kb = bytes >> 10;
-  osd_stat.kb_used = used >> 10;
-  osd_stat.kb_avail = avail >> 10;
-  osd_stat.kb_used_data = stbuf.allocated >> 10;
-  osd_stat.kb_used_omap = stbuf.omap_allocated >> 10;
-  osd_stat.kb_used_meta = stbuf.internal_metadata >> 10;
+  osd_stat.statfs = stbuf;
 }
 
 osd_stat_t OSDService::set_osd_stat(vector<int>& hb_peers,
@@ -1935,6 +1930,9 @@ int OSD::mkfs(CephContext *cct, ObjectStore *store, uuid_d fsid, int whoami)
   }
 
 umount_store:
+  if (ch) {
+    ch.reset();
+  }
   store->umount();
 free_store:
   delete store;
@@ -2046,6 +2044,7 @@ OSD::OSD(CephContext *cct_, ObjectStore *store_,
   tick_timer(cct, osd_lock),
   tick_timer_lock("OSD::tick_timer_lock"),
   tick_timer_without_osd_lock(cct, tick_timer_lock),
+  gss_ktfile_client(cct->_conf.get_val<std::string>("gss_ktab_client_file")),
   authorize_handler_cluster_registry(new AuthAuthorizeHandlerRegistry(cct,
 								      cct->_conf->auth_supported.empty() ?
 								      cct->_conf->auth_cluster_required :
@@ -2111,6 +2110,23 @@ OSD::OSD(CephContext *cct_, ObjectStore *store_,
     &command_tp),
   service(this)
 {
+
+  if (!gss_ktfile_client.empty()) {
+    // Assert we can export environment variable 
+    /* 
+        The default client keytab is used, if it is present and readable,
+        to automatically obtain initial credentials for GSSAPI client
+        applications. The principal name of the first entry in the client
+        keytab is used by default when obtaining initial credentials.
+        1. The KRB5_CLIENT_KTNAME environment variable.
+        2. The default_client_keytab_name profile variable in [libdefaults].
+        3. The hardcoded default, DEFCKTNAME.
+    */
+    const int32_t set_result(setenv("KRB5_CLIENT_KTNAME", 
+                                    gss_ktfile_client.c_str(), 1));
+    ceph_assert(set_result == 0);
+  }
+
   monc->set_messenger(client_messenger);
   op_tracker.set_complaint_and_threshold(cct->_conf->osd_op_complaint_time,
                                          cct->_conf->osd_op_log_threshold);
@@ -2804,7 +2820,7 @@ int OSD::init()
 
   mgrc.set_pgstats_cb([this](){ return collect_pg_stats(); });
   mgrc.set_perf_metric_query_cb(
-      [this](const std::list<OSDPerfMetricQuery> &queries) {
+    [this](const std::map<OSDPerfMetricQuery, OSDPerfMetricLimits> &queries) {
         set_perf_queries(queries);
       },
       [this](std::map<OSDPerfMetricQuery, OSDPerfMetricReport> *reports) {
@@ -3333,9 +3349,6 @@ void OSD::create_logger()
    "rbt", PerfCountersBuilder::PRIO_INTERESTING);
 
   osd_plb.add_u64(l_osd_loadavg, "loadavg", "CPU load");
-  osd_plb.add_u64(l_osd_buf, "buffer_bytes", "Total allocated buffer size", NULL, 0, unit_t(UNIT_BYTES));
-  osd_plb.add_u64(l_osd_history_alloc_bytes, "history_alloc_Mbytes", NULL, 0, unit_t(UNIT_BYTES));
-  osd_plb.add_u64(l_osd_history_alloc_num, "history_alloc_num");
   osd_plb.add_u64(
     l_osd_cached_crc, "cached_crc", "Total number getting crc from crc_cache");
   osd_plb.add_u64(
@@ -3967,6 +3980,7 @@ PG* OSD::_make_pg(
 void OSD::_get_pgs(vector<PGRef> *v, bool clear_too)
 {
   v->clear();
+  v->reserve(get_num_pgs());
   for (auto& s : shards) {
     std::lock_guard l(s->shard_lock);
     for (auto& j : s->pg_slots) {
@@ -3984,6 +3998,7 @@ void OSD::_get_pgs(vector<PGRef> *v, bool clear_too)
 void OSD::_get_pgids(vector<spg_t> *v)
 {
   v->clear();
+  v->reserve(get_num_pgs());
   for (auto& s : shards) {
     std::lock_guard l(s->shard_lock);
     for (auto& j : s->pg_slots) {
@@ -4287,7 +4302,7 @@ bool OSD::maybe_wait_for_max_pg(const OSDMapRef& osdmap,
     return false;
   }
 
-  [[gnu::unused]] auto&& pending_creates_locker = guardedly_lock(pending_creates_lock);
+  std::lock_guard l(pending_creates_lock);
   if (is_mon_create) {
     pending_creates_from_mon++;
   } else {
@@ -4325,7 +4340,7 @@ void OSD::resume_creating_pg()
       return;
     }
     unsigned spare_pgs = max_pgs_per_osd - num_pgs;
-    [[gnu::unused]] auto&& locker = guardedly_lock(pending_creates_lock);
+    std::lock_guard l(pending_creates_lock);
     if (pending_creates_from_mon > 0) {
       dout(20) << __func__ << " pending_creates_from_mon "
 	       << pending_creates_from_mon << dendl;
@@ -4928,9 +4943,10 @@ void OSD::heartbeat()
 
   auto new_stat = service.set_osd_stat(hb_peers, get_num_pgs());
   dout(5) << __func__ << " " << new_stat << dendl;
-  ceph_assert(new_stat.kb);
+  ceph_assert(new_stat.statfs.total);
 
-  float ratio = ((float)new_stat.kb_used) / ((float)new_stat.kb);
+  float ratio =
+   ((float)new_stat.statfs.get_used()) / ((float)new_stat.statfs.total);
   service.check_full_status(ratio);
 
   utime_t now = ceph_clock_now();
@@ -5056,9 +5072,6 @@ void OSD::tick_without_osd_lock()
   ceph_assert(tick_timer_lock.is_locked());
   dout(10) << "tick_without_osd_lock" << dendl;
 
-  logger->set(l_osd_buf, buffer::get_total_alloc());
-  logger->set(l_osd_history_alloc_bytes, shift_round_up(buffer::get_history_alloc_bytes(), 20));
-  logger->set(l_osd_history_alloc_num, buffer::get_history_alloc_num());
   logger->set(l_osd_cached_crc, buffer::get_cached_crc());
   logger->set(l_osd_cached_crc_adjusted, buffer::get_cached_crc_adjusted());
   logger->set(l_osd_missed_crc, buffer::get_missed_crc());
@@ -5619,8 +5632,17 @@ bool OSD::_is_healthy()
   }
 
   if (is_waiting_for_healthy()) {
+     utime_t now = ceph_clock_now();
+     utime_t grace = utime_t(cct->_conf->osd_max_markdown_period, 0);
+     while (!osd_markdown_log.empty() &&
+             osd_markdown_log.front() + grace < now)
+       osd_markdown_log.pop_front();
+     if (osd_markdown_log.size() <= 1) {
+       dout(5) << __func__ << " first time marked as down,"
+               << " try reboot unconditionally" << dendl;
+       return true;
+    }
     std::lock_guard l(heartbeat_lock);
-    utime_t now = ceph_clock_now();
     int num = 0, up = 0;
     for (map<int,HeartbeatInfo>::iterator p = heartbeat_peers.begin();
 	 p != heartbeat_peers.end();
@@ -5874,6 +5896,18 @@ void OSD::send_still_alive(epoch_t epoch, int osd, const entity_addrvec_t &addrs
   MOSDFailure *m = new MOSDFailure(monc->get_fsid(), osd, addrs, 0, epoch,
 				   MOSDFailure::FLAG_ALIVE);
   monc->send_mon_message(m);
+}
+
+void OSD::cancel_pending_failures()
+{
+  std::lock_guard l(heartbeat_lock);
+  auto it = failure_pending.begin();
+  while (it != failure_pending.end()) {
+    dout(10) << __func__ << " canceling in-flight failure report for osd."
+             << it->first << dendl;
+    send_still_alive(osdmap->get_epoch(), it->first, it->second.second);
+    failure_pending.erase(it++);
+  }
 }
 
 void OSD::send_beacon(const ceph::coarse_mono_clock::time_point& now)
@@ -7257,9 +7291,13 @@ MPGStats* OSD::collect_pg_stats()
   std::lock_guard lec{min_last_epoch_clean_lock};
   min_last_epoch_clean = osdmap->get_epoch();
   min_last_epoch_clean_pgs.clear();
+
+  std::set<int64_t> pool_set;
   vector<PGRef> pgs;
   _get_pgs(&pgs);
   for (auto& pg : pgs) {
+    auto pool = pg->pg_id.pgid.pool();
+    pool_set.emplace((int64_t)pool);
     if (!pg->is_primary()) {
       continue;
     }
@@ -7268,6 +7306,16 @@ MPGStats* OSD::collect_pg_stats()
 	min_last_epoch_clean = min(min_last_epoch_clean, lec);
 	min_last_epoch_clean_pgs.push_back(pg->pg_id.pgid);
       });
+  }
+  store_statfs_t st;
+  for (auto p : pool_set) {
+    int r = store->pool_statfs(p, &st);
+    if (r == -ENOTSUP) {
+      break;
+    } else {
+      assert(r >= 0);
+      m->pool_stat[p] = st;
+    }
   }
 
   return m;
@@ -7308,15 +7356,16 @@ vector<DaemonHealthMetric> OSD::get_health_metrics()
       metrics.emplace_back(daemon_metric::SLOW_OPS, 0, 0);
     }
   }
-  with_unique_lock(pending_creates_lock, [&]() {
-      auto n_primaries = pending_creates_from_mon;
-      for (const auto& create : pending_creates_from_osd) {
-	if (create.second) {
-	  n_primaries++;
-	}
+  {
+    std::lock_guard l(pending_creates_lock);
+    auto n_primaries = pending_creates_from_mon;
+    for (const auto& create : pending_creates_from_osd) {
+      if (create.second) {
+	n_primaries++;
       }
-      metrics.emplace_back(daemon_metric::PENDING_CREATING_PGS, n_primaries);
-    });
+    }
+    metrics.emplace_back(daemon_metric::PENDING_CREATING_PGS, n_primaries);
+  }
   return metrics;
 }
 
@@ -7834,6 +7883,7 @@ void OSD::_committed_osd_maps(epoch_t first, epoch_t last, MOSDMap *m)
       // set incarnation so that osd_reqid_t's we generate for our
       // objecter requests are unique across restarts.
       service.objecter->set_client_incarnation(osdmap->get_epoch());
+      cancel_pending_failures();
     }
   }
 
@@ -7975,14 +8025,7 @@ void OSD::_committed_osd_maps(epoch_t first, epoch_t last, MOSDMap *m)
 
   if (do_shutdown) {
     if (network_error) {
-      std::lock_guard l(heartbeat_lock);
-      auto it = failure_pending.begin();
-      while (it != failure_pending.end()) {
-        dout(10) << "handle_osd_ping canceling in-flight failure report for osd."
-		 << it->first << dendl;
-        send_still_alive(osdmap->get_epoch(), it->first, it->second.second);
-        failure_pending.erase(it++);
-      }
+      cancel_pending_failures();
     }
     // trigger shutdown in a different thread
     dout(0) << __func__ << " shutdown OSD via async signal" << dendl;
@@ -8359,7 +8402,7 @@ void OSD::consume_map()
 
   {
     // FIXME (as part of seastar rewrite): move to OSDShard
-    [[gnu::unused]] auto&& pending_create_locker = guardedly_lock(pending_creates_lock);
+    std::lock_guard l(pending_creates_lock);
     for (auto pg = pending_creates_from_osd.begin();
 	 pg != pending_creates_from_osd.end();) {
       if (osdmap->get_pg_acting_rank(pg->first, whoami) < 0) {
@@ -8684,11 +8727,12 @@ void OSD::handle_pg_create(OpRequestRef op)
 	  )));
   }
 
-  with_unique_lock(pending_creates_lock, [=]() {
-      if (pending_creates_from_mon == 0) {
-	last_pg_create_epoch = m->epoch;
-      }
-    });
+  {
+    std::lock_guard l(pending_creates_lock);
+    if (pending_creates_from_mon == 0) {
+      last_pg_create_epoch = m->epoch;
+    }
+  }
 
   maybe_update_heartbeat_peers();
 }
@@ -8895,11 +8939,12 @@ void OSD::handle_fast_pg_create(MOSDPGCreate2 *m)
 	  )));
   }
 
-  with_unique_lock(pending_creates_lock, [=]() {
-      if (pending_creates_from_mon == 0) {
-	last_pg_create_epoch = m->epoch;
-      }
-    });
+  {
+    std::lock_guard l(pending_creates_lock);
+    if (pending_creates_from_mon == 0) {
+      last_pg_create_epoch = m->epoch;
+    }
+  }
 
   m->put();
 }
@@ -9779,12 +9824,26 @@ int OSD::init_op_flags(OpRequestRef& op)
   return 0;
 }
 
-void OSD::set_perf_queries(const std::list<OSDPerfMetricQuery> &queries) {
+void OSD::set_perf_queries(
+    const std::map<OSDPerfMetricQuery, OSDPerfMetricLimits> &queries) {
   dout(10) << "setting " << queries.size() << " queries" << dendl;
+
+  std::list<OSDPerfMetricQuery> supported_queries;
+  for (auto &it : queries) {
+    auto &query = it.first;
+    if (!query.key_descriptor.empty()) {
+      supported_queries.push_back(query);
+    }
+  }
+  if (supported_queries.size() < queries.size()) {
+    dout(1) << queries.size() - supported_queries.size()
+            << " unsupported queries" << dendl;
+  }
 
   {
     Mutex::Locker locker(m_perf_queries_lock);
-    m_perf_queries = queries;
+    m_perf_queries = supported_queries;
+    m_perf_limits = queries;
   }
 
   std::vector<PGRef> pgs;
@@ -9792,7 +9851,7 @@ void OSD::set_perf_queries(const std::list<OSDPerfMetricQuery> &queries) {
   for (auto& pg : pgs) {
     if (pg->is_primary()) {
       pg->lock();
-      pg->set_dynamic_perf_stats_queries(queries);
+      pg->set_dynamic_perf_stats_queries(supported_queries);
       pg->unlock();
     }
   }
@@ -9802,15 +9861,21 @@ void OSD::get_perf_reports(
     std::map<OSDPerfMetricQuery, OSDPerfMetricReport> *reports) {
   std::vector<PGRef> pgs;
   _get_pgs(&pgs);
-  DynamicPerfStats dps(m_perf_queries);
+  DynamicPerfStats dps;
   for (auto& pg : pgs) {
     if (pg->is_primary()) {
+      // m_perf_queries can be modified only in set_perf_queries by mgr client
+      // request, and it is protected by by mgr client's lock, which is held
+      // when set_perf_queries/get_perf_reports are called, so we may not hold
+      // m_perf_queries_lock here.
+      DynamicPerfStats pg_dps(m_perf_queries);
       pg->lock();
-      pg->get_dynamic_perf_stats(&dps);
+      pg->get_dynamic_perf_stats(&pg_dps);
       pg->unlock();
+      dps.merge(pg_dps);
     }
   }
-  dps.add_to_reports(reports);
+  dps.add_to_reports(m_perf_limits, reports);
   dout(20) << "reports for " << reports->size() << " queries" << dendl;
 }
 
@@ -9844,7 +9909,7 @@ void OSDShard::_detach_pg(OSDShardPGSlot *slot)
   pg_slots_by_epoch.erase(pg_slots_by_epoch.iterator_to(*slot));
   slot->epoch = 0;
   if (waiting_for_min_pg_epoch) {
-    min_pg_epoch_cond.Signal();
+    min_pg_epoch_cond.notify_all();
   }
 }
 
@@ -9860,7 +9925,7 @@ void OSDShard::update_pg_epoch(OSDShardPGSlot *slot, epoch_t e)
   dout(30) << "min is now " << pg_slots_by_epoch.begin()->epoch
 	   << " on " << pg_slots_by_epoch.begin()->pg->pg_id << dendl;
   if (waiting_for_min_pg_epoch) {
-    min_pg_epoch_cond.Signal();
+    min_pg_epoch_cond.notify_all();
   }
 }
 
@@ -9876,14 +9941,19 @@ epoch_t OSDShard::get_min_pg_epoch()
 
 void OSDShard::wait_min_pg_epoch(epoch_t need)
 {
-  std::lock_guard l(shard_lock);
+  std::unique_lock l{shard_lock};
   ++waiting_for_min_pg_epoch;
-  while (!pg_slots_by_epoch.empty() &&
-	 pg_slots_by_epoch.begin()->epoch < need) {
-    dout(10) << need << " waiting on "
-	     << pg_slots_by_epoch.begin()->epoch << dendl;
-    min_pg_epoch_cond.Wait(shard_lock);
-  }
+  min_pg_epoch_cond.wait(l, [need, this] {
+    if (pg_slots_by_epoch.empty()) {
+      return true;
+    } else if (pg_slots_by_epoch.begin()->epoch >= need) {
+      return true;
+    } else {
+      dout(10) << need << " waiting on "
+	       << pg_slots_by_epoch.begin()->epoch << dendl;
+      return false;
+    }
+  });
   --waiting_for_min_pg_epoch;
 }
 
@@ -9980,9 +10050,8 @@ void OSDShard::consume_map(
     ++p;
   }
   if (queued) {
-    sdata_wait_lock.Lock();
-    sdata_cond.SignalOne();
-    sdata_wait_lock.Unlock();
+    std::lock_guard l{sdata_wait_lock};
+    sdata_cond.notify_one();
   }
 }
 
@@ -10184,9 +10253,8 @@ void OSDShard::register_and_wake_split_child(PG *pg)
 	epoch,
 	NullEvt())));
 
-  sdata_wait_lock.Lock();
-  sdata_cond.SignalOne();
-  sdata_wait_lock.Unlock();
+  std::lock_guard l{sdata_wait_lock};
+  sdata_cond.notify_one();
 }
 
 void OSDShard::unprime_split_children(spg_t parent, unsigned old_pg_num)
@@ -10198,6 +10266,7 @@ void OSDShard::unprime_split_children(spg_t parent, unsigned old_pg_num)
 	i.first.get_ancestor(old_pg_num) == parent) {
       dout(10) << __func__ << " parent " << parent << " clearing " << i.first
 	       << dendl;
+      _wake_pg_slot(i.first, i.second.get());
       to_delete.push_back(i.first);
     }
   }
@@ -10250,31 +10319,31 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
   bool is_smallest_thread_index = thread_index < osd->num_shards;
 
   // peek at spg_t
-  sdata->shard_lock.Lock();
+  sdata->shard_lock.lock();
   if (sdata->pqueue->empty() &&
       (!is_smallest_thread_index || sdata->context_queue.empty())) {
-    sdata->sdata_wait_lock.Lock();
+    std::unique_lock wait_lock{sdata->sdata_wait_lock};
     if (is_smallest_thread_index && !sdata->context_queue.empty()) {
       // we raced with a context_queue addition, don't wait
-      sdata->sdata_wait_lock.Unlock();
+      wait_lock.unlock();
     } else if (!sdata->stop_waiting) {
       dout(20) << __func__ << " empty q, waiting" << dendl;
       osd->cct->get_heartbeat_map()->clear_timeout(hb);
-      sdata->shard_lock.Unlock();
-      sdata->sdata_cond.Wait(sdata->sdata_wait_lock);
-      sdata->sdata_wait_lock.Unlock();
-      sdata->shard_lock.Lock();
+      sdata->shard_lock.unlock();
+      sdata->sdata_cond.wait(wait_lock);
+      wait_lock.unlock();
+      sdata->shard_lock.lock();
       if (sdata->pqueue->empty() &&
          !(is_smallest_thread_index && !sdata->context_queue.empty())) {
-	sdata->shard_lock.Unlock();
+	sdata->shard_lock.unlock();
 	return;
       }
       osd->cct->get_heartbeat_map()->reset_timeout(hb,
 	  osd->cct->_conf->threadpool_default_timeout, 0);
     } else {
       dout(20) << __func__ << " need return immediately" << dendl;
-      sdata->sdata_wait_lock.Unlock();
-      sdata->shard_lock.Unlock();
+      wait_lock.unlock();
+      sdata->shard_lock.unlock();
       return;
     }
   }
@@ -10286,17 +10355,17 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
 
   if (sdata->pqueue->empty()) {
     if (osd->is_stopping()) {
-      sdata->shard_lock.Unlock();
+      sdata->shard_lock.unlock();
       return;    // OSD shutdown, discard.
     }
-    sdata->shard_lock.Unlock();
+    sdata->shard_lock.unlock();
     handle_oncommits(oncommits);
     return;
   }
 
   OpQueueItem item = sdata->pqueue->dequeue();
   if (osd->is_stopping()) {
-    sdata->shard_lock.Unlock();
+    sdata->shard_lock.unlock();
     return;    // OSD shutdown, discard.
   }
 
@@ -10325,18 +10394,18 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
     uint64_t requeue_seq = slot->requeue_seq;
     ++slot->num_running;
 
-    sdata->shard_lock.Unlock();
+    sdata->shard_lock.unlock();
     osd->service.maybe_inject_dispatch_delay();
     pg->lock();
     osd->service.maybe_inject_dispatch_delay();
-    sdata->shard_lock.Lock();
+    sdata->shard_lock.lock();
 
     auto q = sdata->pg_slots.find(token);
     if (q == sdata->pg_slots.end()) {
       // this can happen if we race with pg removal.
       dout(20) << __func__ << " slot " << token << " no longer there" << dendl;
       pg->unlock();
-      sdata->shard_lock.Unlock();
+      sdata->shard_lock.unlock();
       handle_oncommits(oncommits);
       return;
     }
@@ -10348,7 +10417,7 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
       dout(20) << __func__ << " " << token
 	       << " nothing queued" << dendl;
       pg->unlock();
-      sdata->shard_lock.Unlock();
+      sdata->shard_lock.unlock();
       handle_oncommits(oncommits);
       return;
     }
@@ -10358,7 +10427,7 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
 	       << requeue_seq << ", we raced with _wake_pg_slot"
 	       << dendl;
       pg->unlock();
-      sdata->shard_lock.Unlock();
+      sdata->shard_lock.unlock();
       handle_oncommits(oncommits);
       return;
     }
@@ -10457,13 +10526,13 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
       }
       unsigned pushes_to_free = qi.get_reserved_pushes();
       if (pushes_to_free > 0) {
-	sdata->shard_lock.Unlock();
+	sdata->shard_lock.unlock();
 	osd->service.release_reserved_pushes(pushes_to_free);
 	handle_oncommits(oncommits);
 	return;
       }
     }
-    sdata->shard_lock.Unlock();
+    sdata->shard_lock.unlock();
     handle_oncommits(oncommits);
     return;
   }
@@ -10471,13 +10540,13 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
     OSDMapRef osdmap = sdata->shard_osdmap;
     if (qi.get_map_epoch() > osdmap->get_epoch()) {
       _add_slot_waiter(token, slot, std::move(qi));
-      sdata->shard_lock.Unlock();
+      sdata->shard_lock.unlock();
       pg->unlock();
       handle_oncommits(oncommits);
       return;
     }
   }
-  sdata->shard_lock.Unlock();
+  sdata->shard_lock.unlock();
 
   if (!new_children.empty()) {
     for (auto shard : osd->shards) {
@@ -10532,7 +10601,7 @@ void OSD::ShardedOpWQ::_enqueue(OpQueueItem&& item) {
   assert (NULL != sdata);
   unsigned priority = item.get_priority();
   unsigned cost = item.get_cost();
-  sdata->shard_lock.Lock();
+  sdata->shard_lock.lock();
 
   dout(20) << __func__ << " " << item << dendl;
   if (priority >= osd->op_prio_cutoff)
@@ -10541,12 +10610,10 @@ void OSD::ShardedOpWQ::_enqueue(OpQueueItem&& item) {
   else
     sdata->pqueue->enqueue(
       item.get_owner(), priority, cost, std::move(item));
-  sdata->shard_lock.Unlock();
+  sdata->shard_lock.unlock();
 
-  sdata->sdata_wait_lock.Lock();
-  sdata->sdata_cond.SignalOne();
-  sdata->sdata_wait_lock.Unlock();
-
+  std::lock_guard l{sdata->sdata_wait_lock};
+  sdata->sdata_cond.notify_one();
 }
 
 void OSD::ShardedOpWQ::_enqueue_front(OpQueueItem&& item)
@@ -10554,7 +10621,7 @@ void OSD::ShardedOpWQ::_enqueue_front(OpQueueItem&& item)
   auto shard_index = item.get_ordering_token().hash_to_shard(osd->shards.size());
   auto& sdata = osd->shards[shard_index];
   ceph_assert(sdata);
-  sdata->shard_lock.Lock();
+  sdata->shard_lock.lock();
   auto p = sdata->pg_slots.find(item.get_ordering_token());
   if (p != sdata->pg_slots.end() &&
       !p->second->to_process.empty()) {
@@ -10572,10 +10639,9 @@ void OSD::ShardedOpWQ::_enqueue_front(OpQueueItem&& item)
     dout(20) << __func__ << " " << item << dendl;
   }
   sdata->_enqueue_front(std::move(item), osd->op_prio_cutoff);
-  sdata->shard_lock.Unlock();
-  sdata->sdata_wait_lock.Lock();
-  sdata->sdata_cond.SignalOne();
-  sdata->sdata_wait_lock.Unlock();
+  sdata->shard_lock.unlock();
+  std::lock_guard l{sdata->sdata_wait_lock};
+  sdata->sdata_cond.notify_one();
 }
 
 namespace ceph { 

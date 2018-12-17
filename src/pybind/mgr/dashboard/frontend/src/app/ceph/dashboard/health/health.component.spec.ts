@@ -1,15 +1,17 @@
 import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 
 import * as _ from 'lodash';
 import { PopoverModule } from 'ngx-bootstrap/popover';
 import { of } from 'rxjs';
 
 import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
-import { DashboardService } from '../../../shared/api/dashboard.service';
+import { HealthService } from '../../../shared/api/health.service';
+import { Permissions } from '../../../shared/models/permissions';
+import { AuthStorageService } from '../../../shared/services/auth-storage.service';
 import { SharedModule } from '../../../shared/shared.module';
-import { LogColorPipe } from '../log-color.pipe';
 import { MdsSummaryPipe } from '../mds-summary.pipe';
 import { MgrSummaryPipe } from '../mgr-summary.pipe';
 import { MonSummaryPipe } from '../mon-summary.pipe';
@@ -37,6 +39,11 @@ describe('HealthComponent', () => {
     df: { stats: { total_objects: 0 } },
     pg_info: {}
   };
+  const fakeAuthStorageService = {
+    getPermissions: () => {
+      return new Permissions({ log: ['read'] });
+    }
+  };
 
   configureTestBed({
     imports: [SharedModule, HttpClientTestingModule, PopoverModule.forRoot()],
@@ -47,17 +54,16 @@ describe('HealthComponent', () => {
       MdsSummaryPipe,
       MgrSummaryPipe,
       PgStatusStylePipe,
-      LogColorPipe,
       PgStatusPipe
     ],
     schemas: [NO_ERRORS_SCHEMA],
-    providers: i18nProviders
+    providers: [i18nProviders, { provide: AuthStorageService, useValue: fakeAuthStorageService }]
   });
 
   beforeEach(() => {
     fixture = TestBed.createComponent(HealthComponent);
     component = fixture.componentInstance;
-    getHealthSpy = spyOn(TestBed.get(DashboardService), 'getHealth');
+    getHealthSpy = spyOn(TestBed.get(HealthService), 'getMinimalHealth');
   });
 
   it('should create', () => {
@@ -141,20 +147,34 @@ describe('HealthComponent', () => {
     });
   });
 
-  // @TODO: remove this test when logs are no longer in landing page
-  // See https://tracker.ceph.com/issues/24571 & https://github.com/ceph/ceph/pull/23834
-  it('should render Logs group & cards in addition to the other ones', () => {
+  it('should render "Cluster Status" card text that is not clickable', () => {
+    getHealthSpy.and.returnValue(of(healthPayload));
+    fixture.detectChanges();
+
+    const clusterStatusCard = fixture.debugElement.query(
+      By.css('cd-info-card[cardTitle="Cluster Status"]')
+    );
+    const clickableContent = clusterStatusCard.query(By.css('.info-card-content-clickable'));
+    expect(clickableContent).toBeNull();
+    expect(clusterStatusCard.nativeElement.textContent).toEqual(` ${healthPayload.health.status} `);
+  });
+
+  it('should render "Cluster Status" card text that is clickable (popover)', () => {
     const payload = _.cloneDeep(healthPayload);
-    payload['clog'] = [];
-    payload['audit_log'] = [];
+    payload.health['status'] = 'HEALTH_WARN';
+    payload.health['checks'] = [
+      { severity: 'HEALTH_WARN', type: 'WRN', summary: { message: 'fake warning' } }
+    ];
 
     getHealthSpy.and.returnValue(of(payload));
     fixture.detectChanges();
 
-    const infoGroups = fixture.debugElement.nativeElement.querySelectorAll('cd-info-group');
-    expect(infoGroups.length).toBe(4);
+    expect(component.permissions.log.read).toBeTruthy();
 
-    const infoCards = fixture.debugElement.nativeElement.querySelectorAll('cd-info-card');
-    expect(infoCards.length).toBe(20);
+    const clusterStatusCard = fixture.debugElement.query(
+      By.css('cd-info-card[cardTitle="Cluster Status"]')
+    );
+    const clickableContent = clusterStatusCard.query(By.css('.info-card-content-clickable'));
+    expect(clickableContent.nativeElement.textContent).toEqual(` ${payload.health.status} `);
   });
 });

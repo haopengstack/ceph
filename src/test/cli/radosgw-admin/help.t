@@ -33,6 +33,7 @@
     bi list                    list raw bucket index entries
     bi purge                   purge bucket index entries
     object rm                  remove object
+    object put                 put object
     object stat                stat an object for its metadata
     object unlink              unlink object from bucket index
     object rewrite             rewrite the specified object
@@ -112,6 +113,7 @@
     gc process                 manually process garbage (specify
                                --include-all to process all entries, including unexpired)
     lc list                    list all bucket lifecycle progress
+    lc get                     get a lifecycle bucket configuration
     lc process                 manually process lifecycle
     metadata get               get metadata info
     metadata put               put metadata info
@@ -143,6 +145,8 @@
     reshard status             read bucket resharding status
     reshard process            process of scheduled reshard jobs
     reshard cancel             cancel resharding a bucket
+    reshard stale-instances list list stale-instances from bucket resharding
+    reshard stale-instances rm   cleanup stale-instances from bucket resharding
     sync error list            list sync error
     sync error trim            trim sync error
     mfa create                 create a new MFA TOTP token

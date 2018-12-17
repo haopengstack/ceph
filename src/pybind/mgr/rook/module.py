@@ -128,7 +128,7 @@ def deferred_read(f):
 
 
 class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
-    OPTIONS = [
+    MODULE_OPTIONS = [
         # TODO: configure k8s API addr instead of assuming local
     ]
 
@@ -375,6 +375,11 @@ class RookOrchestrator(MgrModule, orchestrator.Orchestrator):
         else:
             # TODO: RGW, NFS
             raise NotImplementedError(service_type)
+
+    def remove_stateless_service(self, service_type, service_id):
+        return RookWriteCompletion(
+            lambda: self.rook_cluster.rm_service(service_type, service_id), None,
+            "Removing {0} services for {1}".format(service_type, service_id))
 
     def create_osds(self, spec):
         # Validate spec.node

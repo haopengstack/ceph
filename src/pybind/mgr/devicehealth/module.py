@@ -24,7 +24,7 @@ HEALTH_MESSAGES = {
 
 
 class Module(MgrModule):
-    OPTIONS = [
+    MODULE_OPTIONS = [
         {
             'name': 'enable_monitoring',
             'default': str(False),
@@ -113,7 +113,7 @@ class Module(MgrModule):
         super(Module, self).__init__(*args, **kwargs)
 
         # options
-        for opt in self.OPTIONS:
+        for opt in self.MODULE_OPTIONS:
             setattr(self, opt['name'], opt['default'])
 
         # other
@@ -121,7 +121,7 @@ class Module(MgrModule):
         self.event = Event()
 
     def is_valid_daemon_name(self, who):
-        l = cmd.get('who', '').split('.')
+        l = who.split('.')
         if len(l) != 2:
             return False
         if l[0] not in ('osd', 'mon'):
@@ -158,11 +158,11 @@ class Module(MgrModule):
         elif cmd['prefix'] == 'device check-health':
             return self.check_health()
         elif cmd['prefix'] == 'device monitoring on':
-            self.set_config('enable_monitoring', 'true')
+            self.set_module_option('enable_monitoring', 'true')
             self.event.set()
             return 0, '', ''
         elif cmd['prefix'] == 'device monitoring off':
-            self.set_config('enable_monitoring', 'false')
+            self.set_module_option('enable_monitoring', 'false')
             self.set_health_checks({})  # avoid stuck health alerts
             return 0, '', ''
         elif cmd['prefix'] == 'device predict-life-expectancy':
@@ -189,10 +189,10 @@ class Module(MgrModule):
             assert before != after
 
     def config_notify(self):
-        for opt in self.OPTIONS:
+        for opt in self.MODULE_OPTIONS:
             setattr(self,
                     opt['name'],
-                    self.get_config(opt['name']) or opt['default'])
+                    self.get_module_option(opt['name']) or opt['default'])
             self.log.debug(' %s = %s', opt['name'], getattr(self, opt['name']))
 
     def serve(self):
@@ -489,7 +489,7 @@ class Module(MgrModule):
 
         # OSD might be marked 'out' (which means it has no
         # data), however PGs are still attached to it.
-        for _id in osds_out.iterkeys():
+        for _id in osds_out:
             num_pgs = self.get_osd_num_pgs(_id)
             if num_pgs > 0:
                 health_warnings[DEVICE_HEALTH_IN_USE].append(
@@ -577,7 +577,7 @@ class Module(MgrModule):
 
     def predict_lift_expectancy(self, devid):
         plugin_name = ''
-        model = self.get_option('device_failure_prediction_mode')
+        model = self.get_ceph_option('device_failure_prediction_mode')
         if model and model.lower() == 'cloud':
             plugin_name = 'diskprediction_cloud'
         elif model and model.lower() == 'local':
@@ -585,14 +585,15 @@ class Module(MgrModule):
         else:
             return -1, '', 'unable to enable any disk prediction model[local/cloud]'
         try:
-            if self.remote(plugin_name, 'can_run'):
-                return self.remote(plugin_name, 'predict_life_expentancy', devid=devid)
+            can_run, _ = self.remote(plugin_name, 'can_run')
+            if can_run:
+                return self.remote(plugin_name, 'predict_life_expectancy', devid=devid)
         except:
             return -1, '', 'unable to invoke diskprediction local or remote plugin'
 
     def predict_all_devices(self):
         plugin_name = ''
-        model = self.get_option('device_failure_prediction_mode')
+        model = self.get_ceph_option('device_failure_prediction_mode')
         if model and model.lower() == 'cloud':
             plugin_name = 'diskprediction_cloud'
         elif model and model.lower() == 'local':
@@ -600,7 +601,8 @@ class Module(MgrModule):
         else:
             return -1, '', 'unable to enable any disk prediction model[local/cloud]'
         try:
-            if self.remote(plugin_name, 'can_run'):
+            can_run, _ = self.remote(plugin_name, 'can_run')
+            if can_run:
                 return self.remote(plugin_name, 'predict_all_devices')
         except:
             return -1, '', 'unable to invoke diskprediction local or remote plugin'

@@ -1,5 +1,6 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,7 +13,7 @@
  *
  */
 
-#include "rgw_putobj_aio.h"
+#include "rgw_aio.h"
 #include "rgw_putobj_processor.h"
 #include "rgw_multi.h"
 #include "services/svc_sys_obj.h"
@@ -58,12 +59,12 @@ int HeadObjectProcessor::process(bufferlist&& data, uint64_t logical_offset)
 }
 
 
-static int process_completed(const ResultList& completed, RawObjSet *written)
+static int process_completed(const AioResultList& completed, RawObjSet *written)
 {
   std::optional<int> error;
   for (auto& r : completed) {
     if (r.result >= 0) {
-      written->insert(r.obj);
+      written->insert(r.obj.get_ref().obj);
     } else if (!error) { // record first error code
       error = r.result;
     }
@@ -71,10 +72,9 @@ static int process_completed(const ResultList& completed, RawObjSet *written)
   return error.value_or(0);
 }
 
-int RadosWriter::set_stripe_obj(rgw_raw_obj&& raw_obj)
+int RadosWriter::set_stripe_obj(const rgw_raw_obj& raw_obj)
 {
-  stripe_raw = std::move(raw_obj);
-  stripe_obj = store->svc.rados->obj(stripe_raw);
+  stripe_obj = store->svc.rados->obj(raw_obj);
   return stripe_obj.open();
 }
 
@@ -91,7 +91,8 @@ int RadosWriter::process(bufferlist&& bl, uint64_t offset)
   } else {
     op.write(offset, data);
   }
-  auto c = aio->submit(stripe_obj, stripe_raw, &op, cost);
+  constexpr uint64_t id = 0; // unused
+  auto c = aio->submit(stripe_obj, &op, cost, id);
   return process_completed(c, &written);
 }
 
@@ -103,7 +104,8 @@ int RadosWriter::write_exclusive(const bufferlist& data)
   op.create(true); // exclusive create
   op.write_full(data);
 
-  auto c = aio->submit(stripe_obj, stripe_raw, &op, cost);
+  constexpr uint64_t id = 0; // unused
+  auto c = aio->submit(stripe_obj, &op, cost, id);
   auto d = aio->drain();
   c.splice(c.end(), d);
   return process_completed(c, &written);
@@ -177,7 +179,7 @@ int ManifestObjectProcessor::next(uint64_t offset, uint64_t *pstripe_size)
   if (r < 0) {
     return r;
   }
-  r = writer.set_stripe_obj(std::move(stripe_obj));
+  r = writer.set_stripe_obj(stripe_obj);
   if (r < 0) {
     return r;
   }
@@ -221,7 +223,7 @@ int AtomicObjectProcessor::prepare()
   if (r < 0) {
     return r;
   }
-  r = writer.set_stripe_obj(std::move(stripe_obj));
+  r = writer.set_stripe_obj(stripe_obj);
   if (r < 0) {
     return r;
   }
@@ -342,7 +344,7 @@ int MultipartObjectProcessor::prepare_head()
   if (r < 0) {
     return r;
   }
-  r = writer.set_stripe_obj(std::move(stripe_obj));
+  r = writer.set_stripe_obj(stripe_obj);
   if (r < 0) {
     return r;
   }
